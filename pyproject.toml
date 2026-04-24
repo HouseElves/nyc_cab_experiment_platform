@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nyc-cab-experiment-platform"
+version = "0.1.0"
+description = "Deterministic experimentation metrics platform on NYC Taxi event-scale data."
+readme = "README.md"
+authors = [
+    { name = "Andrew Milton", email = "andrewm@chinsegut.com" }
+]
+license = { text = "AGPL-3.0" }
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "pyspark",
+    "pandas",
+    "pyarrow",
+    "python-dotenv",
+    "requests"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "sphinx",
+    "sphinx-rtd-theme"
+]
+
+[project.scripts]
+nyc-cab = "nyc_cab.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["nyc_cab*"]
