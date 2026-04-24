@@ -73,9 +73,16 @@ Python 3.11 is required.
 
 ### Core project
 
+For local development, install the locked core environment and then install
+the package in editable mode:
+
 ```bash
+pip install -r requirements.lock.txt
 pip install -e .
 ```
+
+This installs the pinned runtime, testing, and documentation dependencies
+used by the project.
 
 Spark is executed locally using PySpark. No external cluster is required
 for baseline execution.
