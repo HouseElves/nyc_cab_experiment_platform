@@ -23,3 +23,6 @@ derby.log
 *.log
 docs/_build/
 .DS_Store
+.vscode/settings.json
+internal_deps.gv
+external_deps.gv
