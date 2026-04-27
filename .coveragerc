@@ -1,0 +1,18 @@
+[run]
+branch = True
+source =
+    nyc_cab
+omit =
+    */nyc_cab/test/*
+    */test/*
+    */nyc_cab/__main__.py
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 2
+fail_under = 90
+omit =
+    */nyc_cab/test/*
+    */test/*
+    */nyc_cab/__main__.py

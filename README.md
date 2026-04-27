@@ -20,7 +20,7 @@ This system models key properties of modern experimentation platforms:
 ## Architecture
 
 | Layer | Description |
-|---|---|
+| --- | --- |
 | **Bronze** | Raw monthly trip ingestion to partitioned Parquet |
 | **Silver** | Normalized and validated trip events with derived metrics |
 | **Experiment** | Stable cohort assignment using deterministic hashing |
@@ -38,6 +38,15 @@ All cohort assignments are stable.
 
 The baseline scaffold was produced under strict architectural and linting constraints,
 then validated through local Spark execution and deterministic recomputation checks.
+
+### Code Hygiene
+
+The standard for code hygiene is zero failures against the `.pylintrc` file in the project repository.
+In practice, this means that:
+
+1. Lint failures are fixed in code before push to GitHub, or
+2. A lint suppression is applied at the point of occurrence and documented
+   with an explicit justification in the containing function header.
 
 ### Testing Standards
 
@@ -58,14 +67,17 @@ concerns. Expected future coverage here includes:
 - end-to-end Spark checks
 - Airflow DAG import/invocation validation
 
-### Code Hygiene
+### Running Tests
 
-The standard for code hygiene is zero failures against the `.pylintrc` file in the project repository.
-In practice, this means that:
+Execute the full test suite and measure branch coverage from the project root:
 
-1. Lint failures are fixed in code before push to GitHub, or
-2. A lint suppression is applied at the point of occurrence and documented
-   with an explicit justification in the containing function header.
+```bash
+# Run tests with coverage
+coverage run -m pytest
+
+# Display the coverage report
+coverage report -m
+```
 
 ## Installation
 
