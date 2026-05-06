@@ -19,12 +19,12 @@ This system models key properties of modern experimentation platforms:
 
 ## Architecture
 
-| Layer | Description |
-| --- | --- |
-| **Bronze** | Raw monthly trip ingestion to partitioned Parquet |
-| **Silver** | Normalized and validated trip events with derived metrics |
-| **Experiment** | Stable cohort assignment using deterministic hashing |
-| **Gold** | Cohort-based metric aggregation with windowed computation |
+| Layer | Description | Status |
+| --- | --- | --- |
+| **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Scaffolded |
+| **Silver** | Normalized and validated trip events with derived metrics | Planned |
+| **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
+| **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
 
 ## Philosophy
 
@@ -56,7 +56,8 @@ local `test/` directory, where `test/module.py` contains tests for
 
 These local `test/` directories are authoritative for module-level coverage.
 The minimum standard for push to GitHub is **90% branch coverage** for
-module-level tests.
+module-level tests. The platform currently meets this standard at 100% branch
+coverage across 223 tests on listed modules.
 
 Root-level `test/` suites are reserved for integration and functional
 concerns. Expected future coverage here includes:
@@ -123,15 +124,24 @@ Pinned Airflow provider versions are in `requirements-airflow.lock.txt`.
 
 ## Status
 
-Baseline scaffolding complete:
+Baseline scaffolding complete. Bronze layer scaffolded with full module-level
+test coverage:
 
 - Runtime packaging complete
 - Local Spark execution verified
 - Airflow environment isolated
 - Dependency boundaries established
-- Bronze ingestion implementation next
+- Validation protocol established (`_Validated` mix-in with type-check
+  specifications, structural-tier and semantic-tier separation, `validity_check`
+  composition for nested validated objects)
+- Bronze contract module complete (slice support, source naming, partition
+  layout, Spark-free schema-field representation, two-form validators)
+- Bronze ingestion modules scaffolded (typed request/config objects, path
+  resolution, file acquisition surface, orchestration entry point, private
+  cache abstraction)
+- 223 tests, 100% branch coverage on listed modules
 
-**Next milestone:** Bronze ingestion implementation.
+**Next milestone:** Bronze schema transcription and ingestion implementation.
 
 ## Roadmap
 

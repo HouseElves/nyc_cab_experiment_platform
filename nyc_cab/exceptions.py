@@ -8,15 +8,11 @@ failure modes currently raised.
 
 Further branches (ingestion, Spark session, schema, quality) will land with
 the modules that actually raise them. No speculative placeholders live here.
-
-Note on the ``too-few-public-methods`` suppressions below: :class:`NYCCabError`
-and :class:`ConfigurationError` are intentionally bare. Their only role is to
-serve as ``except`` targets for callers that want to catch a category of
-failure without caring about the specific subclass. Adding synthetic methods
-to satisfy the linter would obscure that intent.
 """
 
 from __future__ import annotations
+from collections.abc import Sequence
+from typing import Any
 
 
 # pylint: disable=too-few-public-methods
@@ -37,7 +33,7 @@ class MissingConfigError(ConfigurationError):
     """
 
     def __init__(self, message: str, *, variable: str | None = None) -> None:
-        """Initialise the error with a message and the missing variable name.
+        """Initialize the error with a message and the missing variable name.
 
         Args:
             message: Human-readable description of the failure.
@@ -48,20 +44,15 @@ class MissingConfigError(ConfigurationError):
 
 
 class InvalidConfigError(ConfigurationError):
-    """Raised when a configuration value is present but malformed.
+    """
+    Raised when a configuration value is present but malformed.
 
     The ``variable`` attribute names the offending environment variable; the
     ``value`` attribute captures the raw string that failed validation.
     """
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        variable: str | None = None,
-        value: str | None = None,
-    ) -> None:
-        """Initialise the error with a message and offending variable.
+    def __init__(self, message: str, *, variable: str | None = None, value: str | None = None) -> None:
+        """Initialize the error with a message and offending variable.
 
         Args:
             message: Human-readable description of the failure.
@@ -71,3 +62,26 @@ class InvalidConfigError(ConfigurationError):
         super().__init__(message)
         self.variable: str | None = variable
         self.value: str | None = value
+
+
+class ValidationError(NYCCabError):
+    """Raised when typed application data fails validation."""
+
+
+class InvalidRequestError(ValidationError):
+    """
+    Raised when a typed request object fails validation.
+
+    The ``violations`` attribute records offending member names and values.
+    """
+
+    def __init__(self, message: str, *, violations: Sequence[tuple[str, Any]] | None = None) -> None:
+        """
+        Initialize the error with a message and optional violation details.
+
+        Args:
+            message: Human-readable description of the failure.
+            violations: Pairs of member names and rejected values.
+        """
+        super().__init__(message)
+        self.violations = tuple(violations or ())

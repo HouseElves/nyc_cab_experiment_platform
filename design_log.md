@@ -27,14 +27,18 @@ The platform employs a shallow, YAGNI-compliant exception hierarchy:
 - `ConfigurationError` as the category for runtime configuration failures
 - `MissingConfigError` and `InvalidConfigError` as concrete configuration
   failure types
+- `ValidationError` as the category for typed object validation failures
+- `InvalidRequestError` as the concrete failure type for invalid typed request
+  data
 
 #### Rationale
 
 This hierarchy provides the necessary granularity for operational error
-handling, such as distinguishing between a missing variable and a malformed
-value, without speculative branching. Concrete exceptions include structured
-metadata such as `variable` and `value` to support precise CLI and
-orchestration diagnostics.
+handling, such as distinguishing between a missing variable, a malformed
+configuration value, and an invalid typed request object, without speculative
+branching. Concrete exceptions include structured metadata such as
+`variable`, `value`, or `violations` to support precise CLI and orchestration
+diagnostics.
 
 ### 3. Principled Configuration Factoring
 
@@ -46,8 +50,10 @@ lifecycle and stability of the data:
   application-wide log level
 - `SparkConfig` in `nyc_cab/spark_config.py` owns engine-specific execution
   settings such as Spark master and application name
-- A future typed ingestion request will own invocation-specific parameters such
-  as dataset selection, time period, and source path
+- `BronzeIngestionConfig` will own Bronze-specific execution settings such as
+  source cache behavior and download timeouts
+- `BronzeIngestionRequest` will own invocation-specific request parameters such
+  as cab type and time period
 
 #### Rationale
 
@@ -119,13 +125,364 @@ exact interpretation of missing and optional inputs. The helper remains
 intentionally narrow. It does not assemble higher-level configuration objects
 and does not replace module-specific validation logic.
 
+### 9. Bronze Ingestion Uses a Focused Four-Module Split
+
+Bronze ingestion is intentionally split across four focused modules within
+`nyc_cab.ingestion`:
+
+- `bronze_request.py` owns typed Bronze request and Bronze-specific config
+  dataclasses
+- `source_resolver.py` owns deterministic URL, filename, and target path
+  derivation
+- `bronze_io.py` owns cache-aware source-file acquisition
+- `bronze_entrypoint.py` owns the top-level ingestion orchestration entry
+  point and the Bronze ingestion result type
+
+Spark session creation remains outside the ingestion package in
+`nyc_cab.orchestration.spark`. Bronze contract concerns also remain outside
+the ingestion package; see decisions 10 and 17.
+
+#### Rationale
+
+This split keeps request modeling, pure path derivation, file acquisition, and
+Spark-driven orchestration isolated from one another. The result is narrower
+module responsibility, lower test setup cost, and a thin external execution
+surface for CLI and Airflow orchestration. The `_entrypoint` suffix on the
+orchestration module disambiguates it from `contracts/bronze.py`, which owns
+contract-level Bronze facts and would otherwise share the same basename.
+
+### 10. Bronze Contract Concerns Remain Local Until They Gain Independent Weight
+
+> **Status:** superseded by decision 17.
+
+Bronze v1 keeps contract concerns local to `nyc_cab.ingestion.bronze` rather
+than introducing a separate `contracts` package immediately.
+
+These local concerns include:
+
+- supported cab types
+- supported Bronze periods
+- the canonical source URL base
+- the canonical source filename template
+- the explicit raw input schema
+
+#### Rationale
+
+A separate contracts package is likely to become useful later, especially when
+schema reuse, contract versioning, or multiple dataset families introduce real
+independent substance. At the current stage, extracting a dedicated contracts
+package would create a ceremonial namespace without sufficient architectural
+weight behind it. The platform therefore defers that factoring until the
+abstraction earns its existence.
+
+### 11. Bronze Requests and Bronze Configs Remain Explicitly Passed, Not Global
+
+The platform does not use Singleton configuration objects for Bronze ingestion
+or for runtime configuration more generally. Typed config and request objects
+remain explicit function inputs.
+
+#### Rationale
+
+Explicit parameter passing preserves determinism, testability, and orchestration
+clarity. A Singleton would introduce hidden global state, weaken test isolation,
+and blur the boundary between configuration composition at the edge and
+application logic in the package. If repeated function signatures later create
+real friction, the platform may introduce a narrow context object, but only in
+response to demonstrated need.
+
+### 12. Validation Is Split Between Type Construction and Structural Checks
+
+Typed request/config dataclasses follow a two-stage validation model:
+
+- `create_validated(...)` acts as the safe constructor used by orchestration
+  code and validates runtime input types before returning an instance
+- `validate()` checks structural correctness of an already-constructed typed
+  object and raises a typed validation exception on failure
+- the raw dataclass constructor remains available for tests that need to create
+  intentionally invalid instances
+
+For Bronze requests specifically, structural validation is distinct from
+Bronze-contract support policy. For example, a request can be structurally valid
+while still being unsupported by Bronze v1.
+
+#### Rationale
+
+This split keeps type enforcement, structural validation, and subsystem policy
+validation conceptually separate. It reduces ambiguity in test design and
+prevents request/config dataclasses from turning into best-effort parsers.
+
+### 13. Raw Input Parsing and Typed Object Validation Are Separate Concerns
+
+Typed dataclass factories are validators, not coercion engines. They expect
+correct runtime types at their boundary. Parsing or coercion of raw external
+inputs belongs to edge adapters such as CLI parsing, environment loaders, or
+future Airflow parameter adapters.
+
+#### Rationale
+
+This preserves a clean distinction between untyped external data and typed
+application objects. Broad coercion inside typed object factories would blur
+responsibility, complicate tests, and make accepted input semantics harder to
+reason about. The platform therefore prefers explicit parsing at the edge and
+strict type validation at typed-object construction time.
+
+### 14. Shared Validation Boilerplate Is Centralized in a Private Helper
+
+> **Status:** extended by decision 18.
+
+The platform centralizes repeated request/config validation boilerplate in a
+private helper module, `nyc_cab._validation`.
+
+This helper owns narrow shared behavior for:
+
+- evaluating a sequence of validation checks
+- collecting failing variable/value pairs as violations
+- raising `InvalidRequestError` when violations are present
+
+The current helper naming convention is `raise_on_violations(...)`.
+
+#### Rationale
+
+This removes repeated list-comprehension and exception-raising boilerplate from
+typed dataclasses without introducing a generalized validation framework. The
+helper remains intentionally narrow and private. Future expansion, such as
+custom exception types or metadata-driven validation, is deferred until a real
+second use case justifies it.
+
+### 15. Bronze Naming Conventions Distinguish Pure Derivation from I/O
+
+Bronze ingestion adopts explicit verb conventions to signal behavior:
+
+- `derive_*` for pure deterministic value derivation
+- `resolve_*` for aggregate composition of multiple derived values
+- `acquire_*` for cache/network/file acquisition
+- `ingest_*` for orchestration entry points
+
+#### Rationale
+
+This naming convention makes side effects easier to spot in code review and
+keeps pure functions distinguishable from operational functions. In particular,
+the platform avoids names that may imply filesystem or network behavior for
+logic that is intentionally pure.
+
+### 16. Bronze Cache Behavior Is Encapsulated Behind the Acquisition Function
+
+Bronze source caching is required for Bronze ingestion, but the cache itself is
+treated as an internal implementation detail of `bronze_io.py`. External code
+interacts with cache-aware acquisition through the public function
+`acquire_bronze_source_file(...)`, not through a cache object API.
+
+#### Rationale
+
+This keeps the public Bronze I/O surface small and avoids exposing a cache
+abstraction before broader reuse justifies it. The implementation can evolve
+internally while orchestration code remains concerned only with acquiring a
+local source file and observing cache-hit metadata.
+
+### 17. Bronze Contract Concerns Promoted to a Dedicated `contracts` Package
+
+> **Supersedes decision 10.**
+
+Bronze contract concerns now live in `nyc_cab/contracts/bronze.py` rather than
+being mixed into the ingestion entry-point module.
+
+The contract module owns:
+
+- supported cab types and supported Bronze periods
+- the canonical source URL base and filename template
+- partition column layout
+- the no-Spark schema-field representation (see decision 21)
+- pure derivation helpers for period identifiers, source filenames, and source
+  URLs
+- both the check-list and raising forms of slice-support and schema validators
+  (see decision 20)
+
+The module performs no I/O and imports no Spark symbols.
+
+#### Rationale
+
+Decision 10 deferred the contracts package on YAGNI grounds, and that deferral
+held until the API shape of the validation framework demanded otherwise. Two
+forms of pressure emerged simultaneously:
+
+- The Tier 2/Tier 3 split between structural and semantic validation (see
+  decision 19) required a single source of truth for layer-specific facts that
+  was separately addressable from the typed request object's universal
+  invariants.
+- The schema check needed to be expressible without coupling the contract to
+  PySpark, since the contract is data the validator consumes rather than code
+  the validator depends on (see decision 21).
+
+Both pressures were absent when decision 10 was made and present by the time
+decision 17 was made. The deferral was correct; the supersession is correct.
+This pattern - defer until the abstraction earns its existence, then commit
+when it does - is the platform's general approach to factoring decisions.
+
+### 18. Validation Protocol via the `_Validated` Mix-in
+
+> **Extends decision 14.**
+
+The platform exposes a validation protocol for typed application objects
+through the `_Validated` mix-in in `nyc_cab._validation`. The mix-in owns:
+
+- the `_type_check_specs` class attribute, declaring constructor-argument
+  type-check specifications as either two-tuples `(field_name, required_type)`
+  or three-tuples `(field_name, required_type, excluded_type)` for cases like
+  rejecting `True`/`False` from an `int` field
+- `create_validated(*args)` as the safe constructor that runs constructor
+  type checks, builds the instance, and runs structural checks
+- `validate()` as the raise-on-failure validator
+- `is_valid()` as the non-raising boolean form
+- `validity_check(field_name)` as the composition helper that returns a check
+  tuple delegating validation to a composed `_Validated` instance
+
+The bare dataclass constructor remains available for tests that need to
+construct intentionally invalid instances.
+
+#### Rationale
+
+Decision 14's `raise_on_violations` helper was the seed of this protocol but
+not the protocol itself. As more typed objects adopted the same validation
+shape (`BronzeIngestionConfig`, `BronzeIngestionRequest`, `AcquiredSourceFile`,
+`_BronzeSourceCache`, `BronzeResolvedPaths`, `BronzeIngestionResult`), the
+duplication of construction-time type-check loops, structural-check methods,
+and exception aggregation became real boilerplate worth centralizing.
+
+The `validity_check` operation is the load-bearing addition. When one
+`_Validated` object composes another - as `BronzeIngestionResult` composes
+`BronzeIngestionRequest` and `AcquiredSourceFile` - the outer object's
+structural checks must delegate to the inner objects without short-circuiting
+on the first inner failure. Calling the inner object's `validate()` directly
+would raise immediately and prevent the outer object from aggregating
+violations across all members. `validity_check` produces a `(passed,
+field_name, self)` tuple that the outer object's check list aggregates
+through the same `raise_on_violations` path as any other check.
+
+This protocol remains intentionally minimal. Domain rules do not belong here;
+the mix-in owns vocabulary, and domain modules own rules.
+
+### 19. Tier 2 Structural Validation vs Tier 3 Semantic Validation
+
+The platform separates validation into two tiers based on the source of truth
+for the rule:
+
+- **Tier 2, structural:** the rule reflects a universal invariant of the
+  field's type or shape. A month must always be 1-12. A year must be
+  reasonable. A non-empty path must not be the empty string. These rules live
+  on the typed object's `_structural_checks` and persist across contract
+  versions.
+
+- **Tier 3, semantic:** the rule reflects what the current contract version
+  supports. Bronze v1 supports yellow cabs and 2023-01 / 2023-02 periods.
+  These rules live in `contracts/bronze.py` and change when the contract
+  version advances.
+
+A check's tier is determined by what knowledge the check depends on, not by
+where the check happens to be invoked. Both tiers use the same `CheckTuple`
+vocabulary and aggregate through the same `raise_on_violations` path.
+
+#### Rationale
+
+The two tiers have different rejection semantics. Structural failures mean
+the data is malformed under invariants that will hold for the next decade.
+Semantic failures mean the data is well-formed but unsupported under a
+versioned contract that will change. Surfacing them through the same exception
+type with the same violation shape is correct - both are user-visible "your
+input was rejected" - but conflating their *source of truth* is not.
+
+Concretely, this discipline rules out a tempting failure mode: putting all
+checks for `BronzeIngestionRequest` into a single `_structural_checks` list
+that mixes `1 <= month <= 12` (structural, eternal) with
+`(year, month) in BRONZE_SUPPORTED_PERIODS` (semantic, contract-dependent).
+That would visually flatten the distinction in code and create cognitive load
+for every reviewer who has to ask "is this rule something we control or
+something the language controls?" when reading a check tuple. The platform
+keeps the two tiers in separate modules instead, with composition at the call
+site if both are needed.
+
+### 20. Two-Function Validator Pattern: Check List and Raising Form
+
+Each contract validation surface exposes both a check-list builder and a
+raising validator:
+
+- `get_*_checks(...)` returns `tuple[CheckTuple, ...]` for composition into
+  a `_Validated` object's check list
+- `validate_*(...)` calls the check-list builder and passes the result to
+  `raise_on_violations`, raising on any failure
+
+The two functions share their underlying logic. The split exists at the
+calling-convention layer.
+
+#### Rationale
+
+The check-list form lets contract checks compose into typed objects via
+decisions 18 and 19. The raising form serves direct callers like the CLI, ad
+hoc scripts, or future Airflow operators that want a fail-loud entry point
+without going through a typed object.
+
+This is the same shape as `_Validated.validate()` and `_Validated.is_valid()`
+on the mix-in - one raises, one doesn't, both are useful in different
+contexts. Standardizing the convention across the framework and the contract
+modules means future readers always know to look for the pair when they want
+either form.
+
+### 21. Schema Representation Is Spark-Free
+
+Bronze schema fields are represented as a frozen dataclass `BronzeSchemaField`
+with the shape `(name: str, spark_type: str, nullable: bool)` rather than as
+a `pyspark.sql.types.StructType`.
+
+The `spark_type` value matches the output of `DataType.simpleString()`. The
+canonical examples are `"string"`, `"int"`, `"bigint"`, `"double"`,
+`"timestamp"`, and `"date"`. Future schema authors must use `simpleString()`
+rather than `typeName()` or `jsonValue()`, which produce different
+stringifications.
+
+#### Rationale
+
+The contract module is data the validator consumes, not code the validator
+depends on. Importing `pyspark.sql.types` into `contracts/bronze.py` would
+make the contract module Spark-coupled and prevent non-Spark consumers
+(documentation generators, schema-diff tools, lightweight validators) from
+reading it. The string-encoded type carries the same information as a
+`StructType` for comparison purposes, and the bridge to Spark types happens
+at the validator's call site rather than at the contract's definition site.
+
+This is the contract module's hardest constraint. The validator cannot do its
+job without comparing against the contract; the contract must remain
+freestanding for the architecture to hold.
+
+### 22. Module Header Docstrings Are Public API Documentation
+
+Module-level docstrings describe the public API surface only. Private
+implementations - leading-underscore classes, leading-underscore functions,
+internal helpers - appear in the source code for maintainers but not in the
+module header.
+
+The `_BronzeSourceCache` class in `nyc_cab.ingestion.bronze_io` is the
+canonical example. The class is fully implemented and publicly accessible
+within the module, but the module header only diagrams `AcquiredSourceFile`
+and the public acquisition function.
+
+#### Rationale
+
+Module docstrings are picked up by Sphinx and rendered into the published
+ReadTheDocs surface. What lands there is what external consumers learn the
+package does. Including private implementation details in the docstring would
+expose abstractions the platform reserves the right to change without notice.
+
+This rule is a documentation-discipline counterpart to the leading-underscore
+naming convention. The naming says "do not import this from outside the
+module"; the docstring discipline says "do not document this for outside
+audiences." Both reinforce the same boundary.
+
 ## Architectural Guardrails
 
 To prevent the architecture from drifting into monolithic design:
 
 - Subsystems must not inject their settings into `RuntimeConfig`. If a
   subsystem requires unique configuration, it must be factored into its own
-  module, as with `SparkConfig`.
+  module, as with `SparkConfig` and `BronzeIngestionConfig`.
 - Modules must not reach into `RuntimeConfig` to find settings that belong to a
   typed ingestion request or an engine-specific configuration object.
 - Orchestration layers such as the CLI and Airflow are responsible for
@@ -134,4 +491,24 @@ To prevent the architecture from drifting into monolithic design:
 - The name `RuntimeConfig` is intentional. It signals that the object captures
   runtime context rather than every possible configuration concern in the
   platform.
-  
+- Bronze request/config objects must remain explicit inputs. The platform must
+  not introduce ambient process-level configuration state.
+- Bronze contract validation must remain separate from request-level structural
+  validation. A typed request object must not silently absorb subsystem policy
+  rules that belong to the Bronze contract.
+- Private helper modules such as `_env.py` and `_validation.py` must remain
+  narrow. They exist to centralize repeated mechanics, not to become generic
+  internal frameworks.
+- The `_Validated` mix-in owns vocabulary; domain modules own rules. The mix-in
+  must not grow domain-specific helpers (`validate_email`,
+  `validate_iso_date`, etc.). New shared mechanics earn entry to
+  `_validation.py` only when at least two domain modules already need them.
+- Structural and semantic validation rules live in different modules and must
+  not be flattened into a single check list. A check's tier is determined by
+  what knowledge it depends on, not by where it is most convenient to invoke.
+- The `contracts/` package must perform no I/O and import no Spark symbols.
+  Schema fields are represented in their own typed structure, not as
+  Spark-native types.
+- Module header docstrings describe public API only. Private classes and
+  functions are visible to maintainers in source but not to external readers
+  on ReadTheDocs.

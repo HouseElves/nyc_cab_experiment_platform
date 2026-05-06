@@ -1,5 +1,5 @@
 """
-Command-line entry point for the NYC Cabs Experimental Platform.
+Command-line entry point for the NYC Cab Experiment Platform.
 """
 
 
