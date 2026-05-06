@@ -2,9 +2,9 @@
 init-hook='import sys; sys.path.append(".")'
 
 [MAIN]
-# Analyse import fallback blocks. This can be used to support both Python 2 and
+# Analyze import fallback blocks. This can be used to support both Python 2 and
 # 3 compatible code, which means that the block might have code that exists
-# only in one or another interpreter, leading to false positives when analysed.
+# only in one or another interpreter, leading to false positives when analyzed.
 analyse-fallback-blocks=no
 
 # Clear in-memory caches upon conclusion of linting. Useful if running pylint
@@ -338,7 +338,7 @@ indent-after-paren=4
 indent-string='    '
 
 # Maximum number of characters on a single line.
-max-line-length=143
+max-line-length=160
 
 # Maximum number of lines in a module.
 max-module-lines=1000
