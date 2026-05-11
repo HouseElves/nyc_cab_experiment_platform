@@ -21,7 +21,7 @@ This system models key properties of modern experimentation platforms:
 
 | Layer | Description | Status |
 | --- | --- | --- |
-| **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Scaffolded |
+| **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Complete |
 | **Silver** | Normalized and validated trip events with derived metrics | Planned |
 | **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
 | **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
@@ -56,18 +56,27 @@ local `test/` directory, where `test/module.py` contains tests for
 
 These local `test/` directories are authoritative for module-level coverage.
 The minimum standard for push to GitHub is **90% branch coverage** for
-module-level tests. The platform currently meets this standard at 100% branch
-coverage across 223 tests on listed modules.
+module-level tests. The platform currently meets this standard at 100% branch coverage
+across 250+ tests on listed modules.
 
-Root-level `test/` suites are reserved for integration and functional
-concerns. Expected future coverage here includes:
+Root-level `test/` suites cover integration and functional concerns.
+Bronze integration testing is split into two tiers:
 
-- workflow integration testing
+- **Tier 1 (`test/bronze_integration.py`):** 11 tests, synthetic parquet
+  pre-staged in a local cache fixture, zero mocks, CI-safe. Covers the
+  full five-step ingestion orchestration path including schema validation,
+  column canonicalization, partition overwrite idempotency (with read-back
+  count assertion), and schema equivalence normalization.
+- **Tier 2 (`test/bronze_live.py`):** 4 tests marked `@pytest.mark.live`,
+  real TLC downloads, verifies schema match and end-to-end canonicalization
+  against live source data. Excluded from standard CI runs.
+
+Expected future root-level coverage includes:
+
 - CLI invocation
 - multi-module execution paths
-- end-to-end Spark checks
 - Airflow DAG import/invocation validation
-
+  
 ### Running Tests
 
 Execute the full test suite and measure branch coverage from the project root:
@@ -124,8 +133,7 @@ Pinned Airflow provider versions are in `requirements-airflow.lock.txt`.
 
 ## Status
 
-Baseline scaffolding complete. Bronze layer scaffolded with full module-level
-test coverage:
+Bronze layer complete. All ingestion stubs replaced with tested implementations:
 
 - Runtime packaging complete
 - Local Spark execution verified
@@ -135,13 +143,19 @@ test coverage:
   specifications, structural-tier and semantic-tier separation, `validity_check`
   composition for nested validated objects)
 - Bronze contract module complete (slice support, source naming, partition
-  layout, Spark-free schema-field representation, two-form validators)
-- Bronze ingestion modules scaffolded (typed request/config objects, path
-  resolution, file acquisition surface, orchestration entry point, private
-  cache abstraction)
-- 223 tests, 100% branch coverage on listed modules
+  layout, Spark-free schema-field representation, two-form validators,
+  schema equivalence layer)
+- Bronze ingestion implemented: `BronzeIngestionConfig`, `BronzeIngestionRequest`,
+  `BronzeResolvedPaths`, cache-aware file acquisition with `_BronzeSourceCache`,
+  five-step orchestration entry point, column canonicalization
+- Schema equivalence layer absorbs TLC source instability: case/underscore
+  normalization, numeric type family (`bigint` ↔ `double`), timestamp family
+  (`timestamp` ↔ `timestamp_ntz`), validated against live February 2023 data
+- Integration tests in two tiers: Tier 1 (CI-safe, synthetic fixtures),
+  Tier 2 (`@pytest.mark.live`, real TLC downloads)
+- 250+ tests, 100% branch coverage on listed modules
 
-**Next milestone:** Bronze schema transcription and ingestion implementation.
+**Next milestone:** Silver layer — normalized trip events with derived metrics.
 
 ## Roadmap
 

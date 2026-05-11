@@ -476,6 +476,146 @@ naming convention. The naming says "do not import this from outside the
 module"; the docstring discipline says "do not document this for outside
 audiences." Both reinforce the same boundary.
 
+### 23. Cache Identity Uses Filename Keying With a Known Upgrade Path
+
+The Bronze source cache currently identifies cached files by their source
+filename alone (e.g., `yellow_tripdata_2023-01.parquet`). The on-disk cache
+key is the filename; a cache hit is a file-exists check at the deterministic
+path returned by `_derive_cache_file_path`.
+
+This is sufficient as long as the content behind a given filename never
+changes. For NYC TLC data this is mostly true — published historical datasets
+are stable — but TLC has been known to silently revise files without changing
+the URL or filename.
+
+The known upgrade path is HTTP conditional-GET keyed on the `ETag` or
+`Last-Modified` header returned by the CloudFront CDN. At download time, the
+cache would record the response `ETag` in a sidecar metadata file alongside
+the cached parquet. At cache-hit time, the cache would compare the stored
+`ETag` against the remote `ETag` (via an `If-None-Match` / `304 Not Modified`
+round trip) before declaring a hit. This avoids re-downloading unchanged files
+and detects silent upstream revisions.
+
+The implementation seam is narrow: `_derive_cache_file_path` stays unchanged
+(filename is still the on-disk key), and the cache-hit check in
+`acquire_bronze_source_file` gains an ETag comparison before returning. The
+retrofit is localized to two functions in `bronze_io.py`.
+
+#### Rationale
+
+Filename keying is correct for single-month manual runs and for the current
+Bronze v1 scope. The pressure to upgrade appears when backfills span multiple
+months across runs separated by days or weeks, and the operator needs
+confidence that a cached file still matches what the source is serving. That
+pressure is absent today and present at the Airflow-orchestrated-backfill
+milestone. The platform defers the upgrade until that milestone, consistent
+with the general factoring discipline established in decisions 10 and 17.
+
+### 24. Schema Definitions Are Hardcoded Until Multi-Version Pressure Justifies a Table
+
+Bronze v1 defines its expected schema as a hardcoded tuple of
+``BronzeSchemaField`` instances in ``contracts/bronze.py``. The tuple is
+version-controlled alongside the code and loaded at import time with no I/O.
+
+The known upgrade path is a time-sliced schema table keyed by
+``(cab_type, schema_version, effective_from, effective_to)``, with one row
+per field per version. The ``BronzeSchemaField`` dataclass is already the
+row shape of this table; the migration from tuple literal to table rows is a
+format change, not a schema change. The accessor function
+``get_bronze_raw_schema_fields(cab_type)`` would change from returning a
+hardcoded tuple to querying the table filtered by cab type and effective
+period. The consumer API does not change.
+
+Three resolution options exist for the table's storage, ordered by
+increasing operational weight:
+
+- A bundled JSON or CSV file read at import time. No Spark, minimal I/O,
+  compatible with the contract module's no-I/O constraint.
+- A thin adapter that loads the table from an external store (Snowflake,
+  S3) at startup. The contract module stays I/O-free; the adapter is the
+  seam where I/O enters.
+- A Python dict keyed by ``(cab_type, schema_version)`` instead of a single
+  tuple. Still hardcoded, still no I/O, but structured for multi-version
+  lookup.
+
+#### Rationale
+
+The inflection point for this upgrade is the moment the platform supports
+more than one distinct schema version across its period range. For Bronze v1
+with two months of one cab type, a single hardcoded tuple is correct. The
+pressure to upgrade appears when the platform expands to cover period ranges
+where the TLC changed column sets (``congestion_surcharge`` added 2019,
+``Airport_fee`` added ~2022, ``cbd_congestion_fee`` added January 2025,
+``passenger_count``/``RatecodeID`` type migration from integer to double),
+or when multiple cab types with different schemas enter scope. The platform
+defers the table until that pressure is present, consistent with decisions
+10, 17, and 23.
+
+### 25. Stub-Testing Discipline: Every `NotImplementedError` Gets a Test
+
+Every `NotImplementedError` stub in the codebase has a corresponding test that
+asserts that exception using `pytest.raises(NotImplementedError)`. This test
+acts as a forwarding declaration: it marks the stub as an explicit open work
+item, ensures the stub is not silently missed in coverage accounting, and
+transfers ownership to the next implementer by failing loudly if the stub is
+replaced without a real test.
+
+The CI coverage gate is set at 90% (wiggle room during active development);
+the destination is 100% branch coverage at alpha. Stub tests are what make
+100% branch coverage sustainable during incremental development — they
+contribute real coverage to the stub branch while signaling incomplete
+implementation rather than hiding it.
+
+#### Rationale
+
+Without stub tests, a `NotImplementedError` stub can reach a CI-green state
+in two bad ways: it is excluded from coverage (invisible), or it is reachable
+but untested (silently uncovered). Both outcomes weaken the coverage gate as a
+signal. A stub test makes the stub's incomplete status explicit, keeps the
+gate meaningful, and documents intent in a place the next implementer cannot
+miss — the failing test itself.
+
+### 26. Schema Equivalence Layer Absorbs TLC Schema Instability at Bronze
+
+TLC source files are not schema-stable across months. The Bronze layer absorbs
+this instability through a normalization and equivalence layer in
+`contracts/bronze.py` rather than by weakening the schema validator or
+hard-coding month-specific patches.
+
+The layer has three components:
+
+- `normalize_bronze_column_name` — case-insensitive, underscore-insensitive
+  column name matching (`Airport_fee` ↔ `airport_fee`). This handles TLC
+  capitalization drift without treating differently-cased names as distinct
+  columns.
+- `BRONZE_TYPE_FAMILIES` — groups Spark types into compatibility families.
+  Integer and floating-point types are merged into a single `"numeric"` family
+  (`bigint` ↔ `double`). Timestamp variants are grouped (`timestamp` ↔
+  `timestamp_ntz`). The numeric super-family was added after February 2023
+  data showed `passenger_count` and `RatecodeID` arriving as `bigint` rather
+  than `double`, indicating a cross-type drift at the TLC source.
+- `bronze_types_are_compatible` — returns true on exact type match or same
+  family match. Two unknown types are not compatible (explicit `None` edge
+  case).
+
+Column canonicalization is applied in `bronze_entrypoint.py` via
+`_canonicalize_bronze_columns` before writing Bronze output. This ensures
+that partitioned Parquet written by the platform always carries canonical
+column names regardless of source variation.
+
+#### Rationale
+
+The alternative — weakening the schema validator to accept any observed
+column name or type — would allow silent schema drift to reach Bronze output
+undetected. The equivalence layer preserves the validator's strictness while
+correctly distinguishing cosmetic variation (capitalization, underscore
+convention) from genuine schema change (new column, removed column, type
+incompatibility across families). The decision to merge integer and floating
+types into a single numeric family was empirically justified by the February
+2023 data, not by speculation: the validator failed on real TLC data, the
+family was added in response, and the live integration test now asserts the
+end-to-end case.
+
 ## Architectural Guardrails
 
 To prevent the architecture from drifting into monolithic design:
