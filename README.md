@@ -22,7 +22,7 @@ This system models key properties of modern experimentation platforms:
 | Layer | Description | Status |
 | --- | --- | --- |
 | **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Complete |
-| **Silver** | Normalized and validated trip events with derived metrics | Planned |
+| **Silver** | Normalized and validated trip events with derived metrics | Scaffolded |
 | **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
 | **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
 
@@ -153,9 +153,14 @@ Bronze layer complete. All ingestion stubs replaced with tested implementations:
   (`timestamp` ↔ `timestamp_ntz`), validated against live February 2023 data
 - Integration tests in two tiers: Tier 1 (CI-safe, synthetic fixtures),
   Tier 2 (`@pytest.mark.live`, real TLC downloads)
-- 250+ tests, 100% branch coverage on listed modules
-
-**Next milestone:** Silver layer — normalized trip events with derived metrics.
+- Silver transformation scaffolded: contract module with two-phase domain
+  constraint model (11 rejection reasons covering integrality, null policy,
+  and domain rules), `transform/` package with typed request, normalization,
+  validation, and orchestration modules, reconciliation invariant
+  (`bronze_count == accepted_count + rejected_count`) enforced structurally
+- 360+ tests, 100% branch coverage on listed modules
+**Next milestone:** Silver layer implementation — fill transformation stubs,
+integration tests, reconciliation tests.
 
 ## Roadmap
 

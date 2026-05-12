@@ -169,4 +169,3 @@ def test_ingest_idempotent_reexecution(spark, tmp_path) -> None:
     # Prove the partition was overwritten, not appended to.
     written_count = spark.read.parquet(str(second.bronze_partition_path)).count()
     assert written_count == _ROW_COUNT
-

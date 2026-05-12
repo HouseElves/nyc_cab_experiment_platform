@@ -112,4 +112,3 @@ def test_live_ingest_february_2023(spark, tmp_path) -> None:
     # of what the source file used.
     written_columns = spark.read.parquet(str(result.bronze_partition_path)).columns
     assert "Airport_fee" in written_columns
-

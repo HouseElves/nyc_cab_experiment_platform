@@ -616,6 +616,120 @@ types into a single numeric family was empirically justified by the February
 family was added in response, and the live integration test now asserts the
 end-to-end case.
 
+### 27. Silver Rejected Records Use Dedicated Partitions (Option A)
+
+Silver v1 persists rejected records in a `silver_rejected` partition
+alongside the `silver` accepted partition. Both share the base schema;
+rejected records carry additional rejection metadata. This guarantees
+Bronze count = Silver accepted + Silver rejected, provably and
+inspectably.
+
+In a production system, Option C (sidecar table with primary key/row
+hash and rejection reason, rejected records remain in Bronze only) would
+be preferred for storage efficiency. Option A is chosen here for
+portfolio debugging sanity: any reviewer can inspect rejected records
+directly without re-running the pipeline or joining back to Bronze.
+
+### 28. Monthly Slice Is Emerging as Shared Vocabulary
+
+Bronze and Silver currently define parallel request types representing
+the same logical work unit: a (cab_type, year, month) monthly slice.
+
+At present, the duplication is intentional. The Silver API is still
+evolving, and the shared abstraction is not yet stable enough to
+justify promotion into a common contract type.
+
+If the shape remains stable after Silver implementation, the common
+fields and structural validation should move into a shared monthly
+slice vocabulary, while layer-specific semantic checks remain owned by
+their respective contracts and orchestrators.
+
+Layer-specific extensions should be modeled through specialization of
+the shared type rather than redefinition of the common fields.
+
+#### Review Note
+
+Over-separation of concerns is a recurring pattern to watch for. The
+signal is two types with identical fields and identical structural
+checks living in different packages. The instinct to separate is
+correct when the types are *likely to diverge*; it is premature when
+the divergence is speculative. When in doubt, start shared and
+specialize when the pressure justifies it — the same factoring
+discipline applied in decisions 10, 17, and 24.
+
+### 29. Silver Constraints Use Two-Phase Validation Around Normalization
+
+Silver domain constraints are split into pre-normalization and
+post-normalization phases. Both phases write to the same
+``_rejection_reasons`` array column. Type normalization (double → int
+casts) runs between the two phases.
+
+Pre-normalization constraints fire on Bronze-typed columns and catch
+two categories of problem that would be invisible after casting:
+
+- **Non-integral doubles in normalization targets.** A
+  ``passenger_count`` of ``1.5`` would be silently truncated to ``1``
+  by ``cast("int")``. The integrality check tags the violation while
+  the original double value is still available.
+- **Nulls in constraint-checked fields.** Spark's three-valued logic
+  means ``NULL >= 0`` evaluates to ``NULL``, not ``True`` or ``False``.
+  Without an explicit null check, a row with ``fare_amount = NULL``
+  would not trigger ``NEGATIVE_FARE`` and would be silently accepted
+  despite having no fare. The null policy rejects NULLs in all five
+  fields that downstream constraints depend on: ``fare_amount``,
+  ``trip_distance``, ``passenger_count``, ``tpep_pickup_datetime``,
+  ``tpep_dropoff_datetime``.
+
+Post-normalization constraints fire on Silver-typed (normalized)
+columns and enforce domain business rules: non-negative fares and
+distances, valid passenger count range, pickup-before-dropoff temporal
+ordering.
+
+Normalization is applied to ALL rows including those already tagged for
+rejection. This preserves the "correctable corral" property from
+decision 27: rejected rows are in normalized form and can be fixed and
+re-submitted without re-normalizing.
+
+#### Flow
+
+    apply_pre_normalization_constraints(df)
+    → apply_type_normalizations(df)
+    → apply_post_normalization_constraints(df)
+    → split_accepted_rejected(df)
+
+#### Rationale
+
+The two-phase split is driven by a data integrity constraint, not an
+aesthetic preference. The integrality check cannot run after
+normalization because the information it needs (the fractional part of
+the double) is destroyed by the cast. Grouping null checks with the
+integrality phase keeps all "must fire before cast" constraints
+together and avoids a third phase.
+
+### 30. Silver Transformation Uses a Focused Four-Module Split
+
+Silver transformation is split across four focused modules within
+``nyc_cab.transform``:
+
+- ``silver_request.py`` owns the typed Silver transform request
+- ``silver_transforms.py`` owns pure column normalizations (type casts)
+- ``silver_validators.py`` owns domain constraint tagging and the
+  accepted/rejected split
+- ``silver_entrypoint.py`` owns the top-level transformation
+  orchestration and the Silver result type
+
+The package is named ``transform`` (not ``transformation``) for
+brevity and parallel construction with ``ingestion``.
+
+#### Rationale
+
+This mirrors the factoring discipline from decision 9. Each module
+has a single responsibility, narrow test setup, and no cross-module
+coupling beyond shared contract types. The validators are further
+split into pre-normalization and post-normalization phases (see
+decision 29), but both phases live in the same module since they
+share the rejection-tagging machinery.
+
 ## Architectural Guardrails
 
 To prevent the architecture from drifting into monolithic design:
@@ -652,3 +766,6 @@ To prevent the architecture from drifting into monolithic design:
 - Module header docstrings describe public API only. Private classes and
   functions are visible to maintainers in source but not to external readers
   on ReadTheDocs.
+- Pre-normalization constraints must fire before type normalization casts.
+  The ordering is load-bearing, not aesthetic: integrality checks depend on
+  the original double values, which are destroyed by the cast.
