@@ -1,4 +1,5 @@
-"""Tests for :mod:`nyc_cab.exceptions`.
+"""
+Tests for :mod:`nyc_cab.exceptions`.
 
 These tests lock the exception hierarchy and the keyword-argument interfaces on
 the concrete leaves. Downstream modules depend on being able to catch

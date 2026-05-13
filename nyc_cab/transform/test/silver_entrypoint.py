@@ -1,5 +1,6 @@
 # pylint: disable=redefined-outer-name
-"""Tests for :mod:`nyc_cab.transform.silver_entrypoint`.
+"""
+Tests for :mod:`nyc_cab.transform.silver_entrypoint`.
 
 These tests cover:
 
@@ -170,6 +171,7 @@ def _request() -> SilverTransformRequest:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_create_validated_happy_path(tmp_path: Path) -> None:
     """A well-formed result with consistent counts constructs cleanly."""
     silver = tmp_path / "silver"
@@ -185,6 +187,7 @@ def test_result_create_validated_happy_path(tmp_path: Path) -> None:
     assert result.is_valid()
 
 
+@pytest.mark.unit
 def test_result_accepts_zero_rejected(tmp_path: Path) -> None:
     """Zero rejected rows is valid (all rows accepted)."""
     silver = tmp_path / "silver"
@@ -197,6 +200,7 @@ def test_result_accepts_zero_rejected(tmp_path: Path) -> None:
     assert result.rejected_count == 0
 
 
+@pytest.mark.unit
 def test_result_accepts_all_rejected(tmp_path: Path) -> None:
     """All rows rejected is valid (zero accepted)."""
     silver = tmp_path / "silver"
@@ -209,6 +213,7 @@ def test_result_accepts_all_rejected(tmp_path: Path) -> None:
     assert result.accepted_count == 0
 
 
+@pytest.mark.unit
 def test_result_accepts_nonexistent_partition_paths(tmp_path: Path) -> None:
     """Partition directories that don't exist yet are structurally valid."""
     silver = tmp_path / "silver" / "not_yet"
@@ -225,6 +230,7 @@ def test_result_accepts_nonexistent_partition_paths(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_non_request(tmp_path: Path) -> None:
     """``request`` must be a SilverTransformRequest."""
     with pytest.raises(InvalidRequestError) as info:
@@ -235,6 +241,7 @@ def test_result_rejects_non_request(tmp_path: Path) -> None:
     assert "request" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_string_silver_path(tmp_path: Path) -> None:
     """``silver_partition_path`` must be a Path."""
     with pytest.raises(InvalidRequestError) as info:
@@ -245,6 +252,7 @@ def test_result_rejects_string_silver_path(tmp_path: Path) -> None:
     assert "silver_partition_path" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_bool_bronze_count(tmp_path: Path) -> None:
     """``bronze_count`` rejects bool despite int compatibility."""
     with pytest.raises(InvalidRequestError) as info:
@@ -259,6 +267,7 @@ def test_result_rejects_bool_bronze_count(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_negative_bronze_count(tmp_path: Path) -> None:
     """Negative bronze_count violates the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -269,6 +278,7 @@ def test_result_rejects_negative_bronze_count(tmp_path: Path) -> None:
     assert "bronze_count" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_negative_accepted_count(tmp_path: Path) -> None:
     """Negative accepted_count violates the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -279,6 +289,7 @@ def test_result_rejects_negative_accepted_count(tmp_path: Path) -> None:
     assert "accepted_count" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_file_as_silver_path(tmp_path: Path) -> None:
     """A regular file at the silver path violates the directory rule."""
     file_path = tmp_path / "not-a-dir"
@@ -295,6 +306,7 @@ def test_result_rejects_file_as_silver_path(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_inconsistent_counts(tmp_path: Path) -> None:
     """bronze_count != accepted + rejected violates the reconciliation invariant."""
     with pytest.raises(InvalidRequestError) as info:
@@ -305,6 +317,7 @@ def test_result_rejects_inconsistent_counts(tmp_path: Path) -> None:
     assert "reconciliation" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_overcounted_accepted(tmp_path: Path) -> None:
     """accepted_count exceeding bronze_count violates reconciliation."""
     with pytest.raises(InvalidRequestError) as info:
@@ -315,6 +328,7 @@ def test_result_rejects_overcounted_accepted(tmp_path: Path) -> None:
     assert "reconciliation" in names
 
 
+@pytest.mark.unit
 def test_reconciliation_passes_at_zero(tmp_path: Path) -> None:
     """Zero bronze, zero accepted, zero rejected satisfies the invariant."""
     result = SilverTransformResult.create_validated(
@@ -328,6 +342,7 @@ def test_reconciliation_passes_at_zero(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_chaining_catches_invalid_request(tmp_path: Path) -> None:
     """A structurally-bad request bubbles up as a request violation."""
     bad_request = SilverTransformRequest("yellow", 2023, 13)
@@ -344,6 +359,7 @@ def test_result_chaining_catches_invalid_request(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_is_frozen(tmp_path: Path) -> None:
     """``SilverTransformResult`` rejects attribute mutation."""
     result = SilverTransformResult.create_validated(
@@ -358,6 +374,7 @@ def test_result_is_frozen(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_transform_rejects_unsupported_period(tmp_path: Path) -> None:
     """An unsupported period raises InvalidRequestError before any Spark interaction."""
     runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
@@ -368,6 +385,7 @@ def test_transform_rejects_unsupported_period(tmp_path: Path) -> None:
     assert "period" in names
 
 
+@pytest.mark.unit
 def test_transform_rejects_unsupported_cab_type(tmp_path: Path) -> None:
     """An unsupported cab type raises InvalidRequestError before any Spark interaction."""
     runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
@@ -383,6 +401,7 @@ def test_transform_rejects_unsupported_cab_type(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.spark
 def test_transform_produces_valid_result(spark, tmp_path) -> None:
     """A clean Bronze partition produces a valid SilverTransformResult."""
     _write_clean_bronze_partition(tmp_path)
@@ -392,6 +411,7 @@ def test_transform_produces_valid_result(spark, tmp_path) -> None:
     assert result.is_valid()
 
 
+@pytest.mark.spark
 def test_transform_all_clean_rows_accepted(spark, tmp_path) -> None:
     """All rows in a clean partition land in accepted with zero rejected."""
     _write_clean_bronze_partition(tmp_path, row_count=_CLEAN_COUNT)
@@ -401,6 +421,7 @@ def test_transform_all_clean_rows_accepted(spark, tmp_path) -> None:
     assert result.rejected_count == 0
 
 
+@pytest.mark.spark
 def test_transform_bronze_count_matches_source(spark, tmp_path) -> None:
     """The bronze_count in the result equals the number of rows in the source partition."""
     _write_clean_bronze_partition(tmp_path, row_count=_CLEAN_COUNT)
@@ -409,6 +430,7 @@ def test_transform_bronze_count_matches_source(spark, tmp_path) -> None:
     assert result.bronze_count == _CLEAN_COUNT
 
 
+@pytest.mark.spark
 def test_transform_result_traces_to_request(spark, tmp_path) -> None:
     """The result's request field is the original request object."""
     _write_clean_bronze_partition(tmp_path)
@@ -423,6 +445,7 @@ def test_transform_result_traces_to_request(spark, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.spark
 def test_transform_writes_silver_partition_directory(spark, tmp_path) -> None:
     """The transform creates the Silver accepted partition directory on disk."""
     _write_clean_bronze_partition(tmp_path)
@@ -433,6 +456,7 @@ def test_transform_writes_silver_partition_directory(spark, tmp_path) -> None:
     assert list(result.silver_partition_path.glob("*.parquet"))
 
 
+@pytest.mark.spark
 def test_transform_writes_rejected_partition_directory(spark, tmp_path) -> None:
     """The transform creates the Silver rejected partition directory on disk."""
     _write_dirty_bronze_partition(tmp_path)
@@ -443,6 +467,7 @@ def test_transform_writes_rejected_partition_directory(spark, tmp_path) -> None:
     assert list(result.silver_rejected_partition_path.glob("*.parquet"))
 
 
+@pytest.mark.spark
 def test_transform_silver_partition_uses_hive_layout(spark, tmp_path) -> None:
     """The Silver accepted partition path follows the cab_type/year/month Hive layout."""
     _write_clean_bronze_partition(tmp_path)
@@ -454,6 +479,7 @@ def test_transform_silver_partition_uses_hive_layout(spark, tmp_path) -> None:
     assert "month=1" in parts
 
 
+@pytest.mark.spark
 def test_transform_rejected_partition_uses_hive_layout(spark, tmp_path) -> None:
     """The Silver rejected partition path follows the cab_type/year/month Hive layout."""
     _write_dirty_bronze_partition(tmp_path)
@@ -470,6 +496,7 @@ def test_transform_rejected_partition_uses_hive_layout(spark, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.spark
 def test_transform_accepted_drops_rejection_column(spark, tmp_path) -> None:
     """The accepted partition does not contain the ``_rejection_reasons`` column."""
     _write_clean_bronze_partition(tmp_path)
@@ -479,6 +506,7 @@ def test_transform_accepted_drops_rejection_column(spark, tmp_path) -> None:
     assert "_rejection_reasons" not in accepted_df.columns
 
 
+@pytest.mark.spark
 def test_transform_accepted_normalizes_passenger_count_to_int(spark, tmp_path) -> None:
     """The accepted partition stores passenger_count as int (Silver type)."""
     _write_clean_bronze_partition(tmp_path)
@@ -489,6 +517,7 @@ def test_transform_accepted_normalizes_passenger_count_to_int(spark, tmp_path) -
     assert schema_map["passenger_count"] == "int"
 
 
+@pytest.mark.spark
 def test_transform_accepted_normalizes_ratecode_to_int(spark, tmp_path) -> None:
     """The accepted partition stores RatecodeID as int (Silver type)."""
     _write_clean_bronze_partition(tmp_path)
@@ -504,6 +533,7 @@ def test_transform_accepted_normalizes_ratecode_to_int(spark, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.spark
 def test_transform_reconciliation_invariant_with_dirty_partition(spark, tmp_path) -> None:
     """bronze_count == accepted_count + rejected_count holds for a mixed partition."""
     _write_dirty_bronze_partition(tmp_path)
@@ -513,6 +543,7 @@ def test_transform_reconciliation_invariant_with_dirty_partition(spark, tmp_path
     assert result.bronze_count == _TOTAL_COUNT
 
 
+@pytest.mark.spark
 def test_transform_dirty_counts_match_expected_violations(spark, tmp_path) -> None:
     """Exactly _DIRTY_COUNT rows are rejected and _CLEAN_COUNT accepted."""
     _write_dirty_bronze_partition(tmp_path)
@@ -522,6 +553,7 @@ def test_transform_dirty_counts_match_expected_violations(spark, tmp_path) -> No
     assert result.rejected_count == _DIRTY_COUNT
 
 
+@pytest.mark.spark
 def test_transform_rejected_retains_rejection_column(spark, tmp_path) -> None:
     """The rejected partition retains the ``_rejection_reasons`` array column."""
     _write_dirty_bronze_partition(tmp_path)
@@ -531,6 +563,7 @@ def test_transform_rejected_retains_rejection_column(spark, tmp_path) -> None:
     assert "_rejection_reasons" in rejected_df.columns
 
 
+@pytest.mark.spark
 def test_transform_known_violations_appear_in_rejected(spark, tmp_path) -> None:
     """Each of the five injected violation reasons appears in the rejected partition."""
     _write_dirty_bronze_partition(tmp_path)
@@ -554,6 +587,7 @@ def test_transform_known_violations_appear_in_rejected(spark, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.spark
 def test_transform_idempotent_reexecution(spark, tmp_path) -> None:
     """Running the same transform twice produces identical counts without error."""
     _write_clean_bronze_partition(tmp_path, row_count=_CLEAN_COUNT)
@@ -569,4 +603,3 @@ def test_transform_idempotent_reexecution(spark, tmp_path) -> None:
     # Read-back count assertion: proves partition overwrite, not append.
     readback_count = spark.read.parquet(str(second.silver_partition_path)).count()
     assert readback_count == _CLEAN_COUNT
- 

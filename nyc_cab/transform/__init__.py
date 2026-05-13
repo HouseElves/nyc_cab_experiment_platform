@@ -1,3 +1,5 @@
+# pylint: disable=line-too-long
+# Allow long lines for mermaid, it does not like embedded newlines.
 """
 Define the NYC Cab data transformation package.
 
@@ -52,7 +54,7 @@ The Silver transformation logic flows as described in this sequence diagram.
 
         Note over Entry,Validators: Step 6: post-normalization constraints
         Entry->>Validators: apply_post_normalization_constraints(df)
-        Note over Validators: Append to _rejection_reasons.<br/>Check fare≥0, distance≥0,<br/>passenger_count 0–9, pickup<dropoff.
+        Note over Validators: Append to _rejection_reasons.<br/>Check fare≥0, distance≥0,<br/>passenger_count 0-9, pickup<dropoff.
         Validators-->>Entry: df (Silver-typed, fully tagged)
 
         Note over Entry,Validators: Step 7: split accepted and rejected

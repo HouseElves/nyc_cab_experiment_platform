@@ -47,26 +47,31 @@ def spark(runtime_config, spark_config, tmp_path_factory):
 # --- build_spark_session ----------------------------------------------------
 
 
+@pytest.mark.spark
 def test_build_spark_session_returns_spark_session(spark) -> None:
     """The factory returns a real SparkSession instance."""
     assert isinstance(spark, SparkSession)
 
 
+@pytest.mark.spark
 def test_build_spark_session_sets_master(spark) -> None:
     """The session uses the master from SparkConfig."""
     assert spark.conf.get("spark.master") == "local[*]"
 
 
+@pytest.mark.spark
 def test_build_spark_session_sets_app_name(spark) -> None:
     """The session uses the app name from SparkConfig."""
     assert spark.conf.get("spark.app.name") == "nyc_cab"
 
 
+@pytest.mark.spark
 def test_build_spark_session_sets_partition_overwrite_mode(spark) -> None:
     """The session has dynamic partition overwrite mode for idempotent writes."""
     assert spark.conf.get("spark.sql.sources.partitionOverwriteMode") == "dynamic"
 
 
+@pytest.mark.spark
 def test_build_spark_session_sets_log_level(spark) -> None:
     """The session's Spark context log level is set without error."""
     # SparkContext doesn't expose log level as a readable property in PySpark,
@@ -77,6 +82,7 @@ def test_build_spark_session_sets_log_level(spark) -> None:
 # --- apply_spark_config -----------------------------------------------------
 
 
+@pytest.mark.unit
 def test_apply_spark_config_returns_builder() -> None:
     """The function returns a Builder for chaining."""
     spark_cfg = SparkConfig(master="local[1]", app_name="test_apply")
@@ -84,6 +90,7 @@ def test_apply_spark_config_returns_builder() -> None:
     assert result is not None
 
 
+@pytest.mark.unit
 def test_apply_spark_config_accepts_custom_master() -> None:
     """A non-default master value is accepted without error."""
     spark_cfg = SparkConfig(master="local[2]", app_name="test_custom_master")
@@ -91,6 +98,7 @@ def test_apply_spark_config_accepts_custom_master() -> None:
     assert builder is not None
 
 
+@pytest.mark.unit
 def test_apply_spark_config_accepts_custom_app_name() -> None:
     """A non-default app name is accepted without error."""
     spark_cfg = SparkConfig(master="local[1]", app_name="custom_name")

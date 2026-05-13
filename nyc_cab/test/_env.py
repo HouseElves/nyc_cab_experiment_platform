@@ -1,4 +1,5 @@
-"""Tests for :mod:`nyc_cab._env`.
+"""
+Tests for :mod:`nyc_cab._env`.
 
 These tests provide direct module-level coverage for the small environment
 mapping helpers shared by the runtime configuration loaders. The helpers are
@@ -13,6 +14,8 @@ import pytest
 
 from nyc_cab import _env
 from nyc_cab.exceptions import MissingConfigError
+
+pytestmark = pytest.mark.unit
 
 
 def test_optional_returns_value_when_present() -> None:

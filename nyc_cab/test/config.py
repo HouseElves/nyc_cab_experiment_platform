@@ -1,4 +1,5 @@
-"""Tests for :mod:`nyc_cab.config`.
+"""
+Tests for :mod:`nyc_cab.config`.
 
 These tests exercise the branches in :func:`nyc_cab.config.load_config` and
 its validation helpers, including:
@@ -21,6 +22,8 @@ import pytest
 from nyc_cab import constants
 from nyc_cab.config import Environment, PathsConfig, RuntimeConfig, load_config
 from nyc_cab.exceptions import InvalidConfigError, MissingConfigError
+
+pytestmark = pytest.mark.unit
 
 
 def _env(**overrides: str) -> dict[str, str]:

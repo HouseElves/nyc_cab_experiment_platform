@@ -15,12 +15,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import write_synthetic_yellow_parquet
+import pytest
+from conftest import write_synthetic_yellow_parquet  # pylint: disable=import-error
 
 from nyc_cab.config import load_config
 from nyc_cab.contracts.bronze import derive_bronze_source_filename
 from nyc_cab.ingestion.bronze_entrypoint import BronzeIngestionResult, ingest_bronze_month
 from nyc_cab.ingestion.bronze_request import BronzeIngestionConfig, BronzeIngestionRequest
+
+pytestmark = pytest.mark.spark
 
 
 _ROW_COUNT = 10

@@ -1,4 +1,5 @@
-"""Tests for :mod:`nyc_cab.ingestion.bronze_request`.
+"""
+Tests for :mod:`nyc_cab.ingestion.bronze_request`.
 
 These tests cover the two typed request objects:
 
@@ -24,6 +25,8 @@ from nyc_cab.ingestion.bronze_request import (
     BronzeIngestionConfig,
     BronzeIngestionRequest,
 )
+
+pytestmark = pytest.mark.unit
 
 
 # --- BronzeIngestionConfig: happy paths -------------------------------------

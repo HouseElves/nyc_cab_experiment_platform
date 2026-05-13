@@ -1,8 +1,5 @@
-# pylint: disable=redefined-outer-name
-# pylint: disable=duplicate-code
-# See design_log.md decision 28: Spark session fixture duplication across Silver test modules
-# is intentional. The shared abstraction will be extracted when the test infrastructure stabilises.
-"""Tests for :mod:`nyc_cab.transform.silver_validators`.
+"""
+Tests for :mod:`nyc_cab.transform.silver_validators`.
 
 Each function is tested in isolation using small inline DataFrames. The
 pre-normalization tests use Bronze-typed columns (double passenger_count,
@@ -30,10 +27,19 @@ from pyspark.sql.types import (
 
 from nyc_cab.contracts.silver import SILVER_REJECTION_COLUMN, RejectionReason
 from nyc_cab.transform.silver_validators import (
+
     apply_post_normalization_constraints,
     apply_pre_normalization_constraints,
     split_accepted_rejected,
 )
+
+pytestmark = pytest.mark.spark
+
+
+# pylint: disable=redefined-outer-name
+# pylint: disable=duplicate-code
+# See design_log.md decision 28: Spark session fixture duplication across Silver test modules
+# is intentional. The shared abstraction will be extracted when the test infrastructure stabilises.
 
 
 # ---------------------------------------------------------------------------

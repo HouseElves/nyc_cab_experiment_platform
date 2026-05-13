@@ -1,5 +1,6 @@
 # pylint: disable=protected-access
-"""Tests for :mod:`nyc_cab._validation`.
+"""
+Tests for :mod:`nyc_cab._validation`.
 
 These tests cover the validation protocol's full surface area:
 
@@ -29,6 +30,8 @@ from nyc_cab._validation import (
     raise_on_violations,
 )
 from nyc_cab.exceptions import InvalidRequestError
+
+pytestmark = pytest.mark.unit
 
 
 # --- raise_on_violations ----------------------------------------------------

@@ -34,6 +34,8 @@ from nyc_cab.contracts.silver import (
 )
 from nyc_cab.exceptions import InvalidRequestError
 
+pytestmark = pytest.mark.unit
+
 
 # --- Module-level constants -------------------------------------------------
 

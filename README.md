@@ -103,9 +103,12 @@ remains trusted rather than avoided. The intended tier structure is:
 - **Audit path (release / manual):** coverage report, Sphinx docs build,
   full local pipeline run, reproducibility check.
 
-Formalising this structure via pytest marks and corresponding GitHub Actions
-gates is the current milestone. Until marks are in place, CI runs all
-fast-path and Spark-path tests together under `-m "not live"`.
+All 429 tests carry a `unit`, `spark`, or `live` mark. Mixed-responsibility
+files (result types alongside orchestration tests) use per-function marks;
+homogeneous files use a module-level `pytestmark`. CI runs fast-path and
+Spark-path tests together under `-m "not live"` until the GitHub Actions
+jobs are split by tier; the marks are in place for that split to be
+mechanical when it lands.
 
 ### Running Tests
 
@@ -118,8 +121,17 @@ coverage run -m pytest
 # Display the coverage report
 coverage report -m
 
-# Run only tests that do not require network access
+# Fast path only — no JVM, no I/O
+pytest -m unit
+
+# Spark path only — fixture-backed PySpark tests
+pytest -m spark
+
+# Fast + Spark (excludes live TLC downloads)
 pytest -m "not live"
+
+# Live tests only — requires network access
+pytest -m live
 ```
 
 ## Installation
@@ -194,12 +206,18 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   at result construction time
 - Integration tests in two tiers per layer: Tier 1 (CI-safe, synthetic
   fixtures, zero mocks), Tier 2 (`@pytest.mark.live`, real source data)
-- 429 tests (total), 100% branch coverage on listed modules
+- All 429 tests annotated with `unit`, `spark`, or `live` pytest marks;
+  mixed-responsibility files carry per-function marks
+- GitHub Actions CI live: three independent jobs (lint, test, import smoke);
+  pylint 10/10 gate, 90% branch coverage gate, clean-install import gate
+- 429 tests, 100% branch coverage on listed modules
 
-**Next milestone:** CI and test-tier infrastructure — pytest mark-based
-separation of fast, Spark, live, and audit test tiers with corresponding
-GitHub Actions gates (lint, test, import smoke), coverage reporting, and
-`python-dotenv` dependency cleanup. Experiment layer follows.
+**Next milestone:** `nyc_cab_events` — Kafka scaffolding for the
+`trip.completed.v1` event. Deterministic producer from Silver accepted
+records, contract validator, invalid-event quarantine topic, idempotent
+consumer, hourly Postgres aggregate sink, and reconciliation against
+Silver batch counts. Implements the batch-event bridge pattern
+(design log decision 31).
 
 ## Roadmap
 

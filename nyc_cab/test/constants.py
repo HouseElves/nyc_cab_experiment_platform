@@ -1,4 +1,5 @@
-"""Tests for :mod:`nyc_cab.constants`.
+"""
+Tests for :mod:`nyc_cab.constants`.
 
 These tests guard the invariants that other modules rely on: package identity,
 the environment-variable prefix, the medallion-layer tuple, and the platform
@@ -7,7 +8,11 @@ defaults used by runtime configuration modules.
 
 from __future__ import annotations
 
+import pytest
+
 from nyc_cab import constants
+
+pytestmark = pytest.mark.unit
 
 
 def test_package_name_is_nyc_cab() -> None:

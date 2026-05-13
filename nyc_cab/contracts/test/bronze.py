@@ -1,5 +1,6 @@
 # pylint: disable=redefined-outer-name
-"""Tests for :mod:`nyc_cab.contracts.bronze`.
+"""
+Tests for :mod:`nyc_cab.contracts.bronze`.
 
 These tests cover the Bronze v1 contract surface: derivation helpers,
 slice-support predicates and check builders, the schema-field accessor,
@@ -43,6 +44,8 @@ from nyc_cab.contracts.bronze import (
     validate_supported_bronze_slice,
 )
 from nyc_cab.exceptions import InvalidRequestError
+
+pytestmark = pytest.mark.unit
 
 
 _STUB_YELLOW_FIELDS: tuple[BronzeSchemaField, ...] = (
@@ -271,7 +274,7 @@ def test_rename_plan_empty_when_names_match(monkeypatch) -> None:
     """No renames needed when observed names match canonical names exactly."""
     monkeypatch.setattr("nyc_cab.contracts.bronze.BRONZE_RAW_YELLOW_SCHEMA_FIELDS", _STUB_YELLOW_FIELDS)
     plan = get_bronze_schema_rename_plan("yellow", ["VendorID", "trip_distance", "payment_type"])
-    assert plan == ()
+    assert not plan
 
 def test_rename_plan_produces_case_rename(monkeypatch) -> None:
     """A case-different observed name produces a rename pair."""

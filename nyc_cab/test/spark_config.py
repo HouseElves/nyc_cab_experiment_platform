@@ -9,6 +9,8 @@ import pytest
 from nyc_cab import constants
 from nyc_cab.spark_config import SparkConfig, load_spark_config
 
+pytestmark = pytest.mark.unit
+
 
 def _env(**overrides: str) -> dict[str, str]:
     """Return an environment mapping containing only the supplied overrides."""

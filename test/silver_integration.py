@@ -1,4 +1,7 @@
 # pylint: disable=redefined-outer-name
+# pylint: disable=duplicate-code
+# Fixture helpers (partition path, pyarrow writers, _request) overlap with
+# silver_entrypoint module tests by design — see design_log.md decision 28.
 """
 Silver transformation integration tests (fast, synthetic, CI-safe).
 
@@ -19,6 +22,8 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 
+import pytest
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -26,6 +31,8 @@ from nyc_cab.config import load_config
 from nyc_cab.contracts.silver import RejectionReason
 from nyc_cab.transform.silver_entrypoint import SilverTransformResult, transform_silver_month
 from nyc_cab.transform.silver_request import SilverTransformRequest
+
+pytestmark = pytest.mark.spark
 
 
 # ---------------------------------------------------------------------------

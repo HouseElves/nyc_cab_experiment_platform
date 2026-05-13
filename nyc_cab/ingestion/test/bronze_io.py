@@ -1,5 +1,6 @@
 # pylint: disable=redefined-outer-name
-"""Tests for :mod:`nyc_cab.ingestion.bronze_io`.
+"""
+Tests for :mod:`nyc_cab.ingestion.bronze_io`.
 
 These tests cover the file-acquisition concerns of the Bronze pipeline:
 
@@ -33,6 +34,8 @@ from nyc_cab.ingestion.bronze_io import (
     acquire_bronze_source_file,
 )
 from nyc_cab.ingestion.bronze_request import BronzeIngestionConfig
+
+pytestmark = pytest.mark.unit
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -516,3 +519,4 @@ def test_acquire_source_url_flows_through_to_result(tmp_path: Path, monkeypatch)
     result = acquire_bronze_source_file("https://canonical/data.parquet", "data.parquet", config)
 
     assert result.source_url == "https://canonical/data.parquet"
+ 

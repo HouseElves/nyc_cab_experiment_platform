@@ -1,8 +1,5 @@
-# pylint: disable=redefined-outer-name
-# pylint: disable=duplicate-code
-# See design_log.md decision 28: Spark session fixture duplication across Silver test modules
-# is intentional. The shared abstraction will be extracted when the test infrastructure stabilises.
-"""Tests for :mod:`nyc_cab.transform.silver_transforms`.
+"""
+Tests for :mod:`nyc_cab.transform.silver_transforms`.
 
 These tests exercise ``apply_type_normalizations`` against a real Spark
 session using small inline DataFrames. No I/O, no fixtures beyond the
@@ -16,6 +13,14 @@ from pyspark.sql import SparkSession
 from pyspark.sql.types import DoubleType, StructField, StructType
 
 from nyc_cab.transform.silver_transforms import apply_type_normalizations
+
+pytestmark = pytest.mark.spark
+
+
+# pylint: disable=redefined-outer-name
+# pylint: disable=duplicate-code
+# See design_log.md decision 28: Spark session fixture duplication across Silver test modules
+# is intentional. The shared abstraction will be extracted when the test infrastructure stabilises.
 
 
 # Schema: two normalization targets (double) plus one bystander column.

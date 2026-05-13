@@ -1,5 +1,6 @@
 # pylint: disable=redefined-outer-name
-"""Tests for :mod:`nyc_cab.ingestion.bronze_entrypoint`.
+"""
+Tests for :mod:`nyc_cab.ingestion.bronze_entrypoint`.
 
 These tests cover:
 
@@ -113,6 +114,7 @@ def spark(tmp_path_factory):
 # --- BronzeIngestionResult: happy paths -------------------------------------
 
 
+@pytest.mark.unit
 def test_result_create_validated_happy_path(tmp_path: Path) -> None:
     """A well-formed result constructs cleanly."""
     partition = tmp_path / "year=2023" / "month=1"
@@ -124,6 +126,7 @@ def test_result_create_validated_happy_path(tmp_path: Path) -> None:
     assert result.is_valid()
 
 
+@pytest.mark.unit
 def test_result_accepts_zero_row_count(tmp_path: Path) -> None:
     """Zero rows is structurally valid (empty partition write)."""
     partition = tmp_path / "year=2023" / "month=1"
@@ -134,6 +137,7 @@ def test_result_accepts_zero_row_count(tmp_path: Path) -> None:
     assert result.row_count == 0
 
 
+@pytest.mark.unit
 def test_result_accepts_nonexistent_partition_path(tmp_path: Path) -> None:
     """A partition directory that doesn't exist yet is structurally valid."""
     not_yet = tmp_path / "year=2023" / "month=1"
@@ -146,6 +150,7 @@ def test_result_accepts_nonexistent_partition_path(tmp_path: Path) -> None:
 # --- BronzeIngestionResult: type-check rejections ---------------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_non_request(tmp_path: Path) -> None:
     """``request`` must be a :class:`BronzeIngestionRequest`."""
     with pytest.raises(InvalidRequestError) as info:
@@ -156,6 +161,7 @@ def test_result_rejects_non_request(tmp_path: Path) -> None:
     assert "request" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_non_source(tmp_path: Path) -> None:
     """``source`` must be an :class:`AcquiredSourceFile`."""
     with pytest.raises(InvalidRequestError) as info:
@@ -166,6 +172,7 @@ def test_result_rejects_non_source(tmp_path: Path) -> None:
     assert "source" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_string_partition_path(tmp_path: Path) -> None:
     """``bronze_partition_path`` must be a ``Path``."""
     with pytest.raises(InvalidRequestError) as info:
@@ -176,6 +183,7 @@ def test_result_rejects_string_partition_path(tmp_path: Path) -> None:
     assert "bronze_partition_path" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_bool_row_count(tmp_path: Path) -> None:
     """``row_count`` rejects ``True``/``False`` despite int compatibility."""
     with pytest.raises(InvalidRequestError) as info:
@@ -185,6 +193,7 @@ def test_result_rejects_bool_row_count(tmp_path: Path) -> None:
     assert ("row_count", True) in info.value.violations
 
 
+@pytest.mark.unit
 def test_result_rejects_string_row_count(tmp_path: Path) -> None:
     """``row_count`` must be an int."""
     with pytest.raises(InvalidRequestError) as info:
@@ -197,6 +206,7 @@ def test_result_rejects_string_row_count(tmp_path: Path) -> None:
 # --- BronzeIngestionResult: structural rejections ---------------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_negative_row_count(tmp_path: Path) -> None:
     """Negative row counts violate the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -206,6 +216,7 @@ def test_result_rejects_negative_row_count(tmp_path: Path) -> None:
     assert ("row_count", -1) in info.value.violations
 
 
+@pytest.mark.unit
 def test_result_rejects_file_as_partition_path(tmp_path: Path) -> None:
     """A regular file at the partition path violates the directory rule."""
     file_path = tmp_path / "not-a-dir"
@@ -220,6 +231,7 @@ def test_result_rejects_file_as_partition_path(tmp_path: Path) -> None:
 # --- validity_check chaining ------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_chaining_catches_invalid_request(tmp_path: Path) -> None:
     """A structurally-bad request bubbles up as a ``request`` violation."""
     bad_request = BronzeIngestionRequest("yellow", 2023, 13)
@@ -231,6 +243,7 @@ def test_result_chaining_catches_invalid_request(tmp_path: Path) -> None:
     assert "request" in names
 
 
+@pytest.mark.unit
 def test_result_chaining_catches_invalid_source(tmp_path: Path) -> None:
     """A structurally-bad source bubbles up as a ``source`` violation."""
     file_path = tmp_path / "data.parquet"
@@ -244,6 +257,7 @@ def test_result_chaining_catches_invalid_source(tmp_path: Path) -> None:
     assert "source" in names
 
 
+@pytest.mark.unit
 def test_result_chaining_aggregates_multiple_member_failures(tmp_path: Path) -> None:
     """Multiple structurally-bad composed members all surface in one exception."""
     bad_request = BronzeIngestionRequest("yellow", 2023, 13)
@@ -262,6 +276,7 @@ def test_result_chaining_aggregates_multiple_member_failures(tmp_path: Path) -> 
 # --- Frozenness -------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_result_is_frozen(tmp_path: Path) -> None:
     """:class:`BronzeIngestionResult` rejects attribute mutation."""
     partition = tmp_path / "year=2023" / "month=1"
@@ -276,6 +291,7 @@ def test_result_is_frozen(tmp_path: Path) -> None:
 # --- ingest_bronze_month: step 1 rejection ----------------------------------
 
 
+@pytest.mark.unit
 def test_ingest_rejects_unsupported_slice(tmp_path: Path) -> None:
     """An unsupported slice is rejected before any I/O or Spark interaction."""
     runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
@@ -287,6 +303,7 @@ def test_ingest_rejects_unsupported_slice(tmp_path: Path) -> None:
     assert "cab_type" in names
 
 
+@pytest.mark.unit
 def test_ingest_rejects_unsupported_period(tmp_path: Path) -> None:
     """An unsupported period is rejected before any I/O or Spark interaction."""
     runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
@@ -301,6 +318,7 @@ def test_ingest_rejects_unsupported_period(tmp_path: Path) -> None:
 # --- ingest_bronze_month: happy path ----------------------------------------
 
 
+@pytest.mark.spark
 def test_ingest_happy_path(spark, tmp_path, monkeypatch) -> None:
     """Full ingestion run produces a valid result with correct row count."""
     source_file = _write_test_source_parquet(tmp_path)
@@ -325,6 +343,7 @@ def test_ingest_happy_path(spark, tmp_path, monkeypatch) -> None:
     assert result.is_valid()
 
 
+@pytest.mark.spark
 def test_ingest_writes_partition_directory(spark, tmp_path, monkeypatch) -> None:
     """The ingestion creates the Hive-style partition directory on disk."""
     source_file = _write_test_source_parquet(tmp_path)
@@ -348,6 +367,7 @@ def test_ingest_writes_partition_directory(spark, tmp_path, monkeypatch) -> None
     assert len(parquet_files) > 0
 
 
+@pytest.mark.spark
 def test_ingest_partition_path_uses_hive_layout(spark, tmp_path, monkeypatch) -> None:
     """The written partition path follows the cab_type/year/month Hive layout."""
     source_file = _write_test_source_parquet(tmp_path)
@@ -371,6 +391,7 @@ def test_ingest_partition_path_uses_hive_layout(spark, tmp_path, monkeypatch) ->
     assert "month=1" in parts
 
 
+@pytest.mark.spark
 def test_ingest_source_url_flows_through_to_result(spark, tmp_path, monkeypatch) -> None:
     """The result's source carries the URL that was passed to acquisition."""
     source_file = _write_test_source_parquet(tmp_path)
@@ -394,6 +415,7 @@ def test_ingest_source_url_flows_through_to_result(spark, tmp_path, monkeypatch)
 # --- ingest_bronze_month: canonicalization ----------------------------------
 
 
+@pytest.mark.spark
 def test_ingest_canonicalizes_column_names(spark, tmp_path, monkeypatch) -> None:
     """Source columns with non-canonical casing are renamed before writing."""
     source_file = _write_test_source_parquet_lowercase(tmp_path)
@@ -421,6 +443,7 @@ def test_ingest_canonicalizes_column_names(spark, tmp_path, monkeypatch) -> None
 # --- ingest_bronze_month: idempotent re-execution ---------------------------
 
 
+@pytest.mark.spark
 def test_ingest_idempotent_reexecution(spark, tmp_path, monkeypatch) -> None:
     """Running the same ingestion twice produces the same result without error."""
     source_file = _write_test_source_parquet(tmp_path)
@@ -447,6 +470,7 @@ def test_ingest_idempotent_reexecution(spark, tmp_path, monkeypatch) -> None:
 # --- ingest_bronze_month: step 4 schema rejection --------------------------
 
 
+@pytest.mark.spark
 def test_ingest_rejects_schema_mismatch(spark, tmp_path, monkeypatch) -> None:
     """A source file whose schema does not match the contract is rejected."""
     source_file = _write_test_source_parquet(tmp_path)
@@ -475,6 +499,7 @@ def test_ingest_rejects_schema_mismatch(spark, tmp_path, monkeypatch) -> None:
     assert "VendorID.spark_type" in names
 
 
+@pytest.mark.spark
 def test_ingest_schema_rejection_does_not_write(spark, tmp_path, monkeypatch) -> None:
     """A schema rejection at step 4 prevents the partition write at step 5."""
     source_file = _write_test_source_parquet(tmp_path)

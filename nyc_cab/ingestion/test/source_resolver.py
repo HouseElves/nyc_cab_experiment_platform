@@ -1,4 +1,5 @@
-"""Tests for :mod:`nyc_cab.ingestion.source_resolver`.
+"""
+Tests for :mod:`nyc_cab.ingestion.source_resolver`.
 
 These tests cover the path-resolution layer of the Bronze pipeline:
 
@@ -27,6 +28,8 @@ from nyc_cab.ingestion.source_resolver import (
     derive_source_url,
     resolve_bronze_paths,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def _runtime_config(tmp_path: Path) -> RuntimeConfig:

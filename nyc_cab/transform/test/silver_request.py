@@ -10,6 +10,8 @@ import pytest
 from nyc_cab.exceptions import InvalidRequestError
 from nyc_cab.transform.silver_request import SilverTransformRequest
 
+pytestmark = pytest.mark.unit
+
 
 # --- Happy paths ------------------------------------------------------------
 

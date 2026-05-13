@@ -730,6 +730,19 @@ split into pre-normalization and post-normalization phases (see
 decision 29), but both phases live in the same module since they
 share the rejection-tagging machinery.
 
+### 31. Create a Batch-Event Bridge
+
+The `nyc_cab_events` package implements a batch-event bridge pattern:
+source-of-truth batch records from the Silver accepted layer drive
+deterministic event generation, and streaming aggregates reconcile back
+against batch counts.
+
+#### Rationale
+
+This mirrors prior production work translating governed batch analytics into
+event-shaped processing streams, while using public data and project-owned
+models. The platform and domain differ; the architectural pattern is the same.
+
 ## Architectural Guardrails
 
 To prevent the architecture from drifting into monolithic design:
