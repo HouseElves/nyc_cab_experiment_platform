@@ -23,13 +23,14 @@ dependencies = [
     "pyspark",
     "pandas",
     "pyarrow",
-    "python-dotenv",
     "requests"
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "pytest-cov",
+    "pylint",
     "sphinx",
     "sphinx-rtd-theme"
 ]
