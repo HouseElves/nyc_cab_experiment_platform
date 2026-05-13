@@ -22,7 +22,7 @@ This system models key properties of modern experimentation platforms:
 | Layer | Description | Status |
 | --- | --- | --- |
 | **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Complete |
-| **Silver** | Normalized and validated trip events with derived metrics | Scaffolded |
+| **Silver** | Normalized and validated trip events with derived metrics | Complete |
 | **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
 | **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
 
@@ -56,11 +56,11 @@ local `test/` directory, where `test/module.py` contains tests for
 
 These local `test/` directories are authoritative for module-level coverage.
 The minimum standard for push to GitHub is **90% branch coverage** for
-module-level tests. The platform currently meets this standard at 100% branch coverage
-across 250+ tests on listed modules.
+module-level tests. The platform currently meets this standard at 100% branch
+coverage across 409 tests on listed modules.
 
 Root-level `test/` suites cover integration and functional concerns.
-Bronze integration testing is split into two tiers:
+Bronze and Silver integration testing is each split into two tiers:
 
 - **Tier 1 (`test/bronze_integration.py`):** 11 tests, synthetic parquet
   pre-staged in a local cache fixture, zero mocks, CI-safe. Covers the
@@ -70,13 +70,43 @@ Bronze integration testing is split into two tiers:
 - **Tier 2 (`test/bronze_live.py`):** 4 tests marked `@pytest.mark.live`,
   real TLC downloads, verifies schema match and end-to-end canonicalization
   against live source data. Excluded from standard CI runs.
+- **Tier 1 (`test/silver_integration.py`):** 10 tests, synthetic Bronze
+  partition pre-staged in the expected Hive directory layout, zero mocks,
+  CI-safe. Covers the full 11-step transformation orchestration path
+  including two-phase constraint validation, type normalization, accepted
+  and rejected partition writes, reconciliation invariant, and idempotent
+  re-execution with read-back count assertion.
+- **Tier 2 (`test/silver_live.py`):** 6 tests marked `@pytest.mark.live`,
+  real TLC downloads for January and February 2023, verifies plausible
+  accepted/rejected ratios, reconciliation, partition output, and
+  February schema-drift compatibility against live source data.
 
 Expected future root-level coverage includes:
 
 - CLI invocation
 - multi-module execution paths
 - Airflow DAG import/invocation validation
-  
+
+### Test Suite Discipline
+
+As Spark/JVM integration tests have grown, the project must split validation
+into fast local unit checks, fixture-backed Spark integration checks,
+live-source tests, and scheduled/manual end-to-end checks so the test suite
+remains trusted rather than avoided. The intended tier structure is:
+
+- **Fast path (every commit):** pure-Python contract, request, and validation
+  tests — no JVM, no I/O. Target mark: `unit`.
+- **Spark path (PR / pre-push):** fixture-backed PySpark module tests and
+  Tier 1 integration tests. Target mark: `spark`.
+- **Live path (scheduled / manual):** real TLC downloads, Bronze → Silver
+  smoke test. Mark: `live` (already registered).
+- **Audit path (release / manual):** coverage report, Sphinx docs build,
+  full local pipeline run, reproducibility check.
+
+Formalising this structure via pytest marks and corresponding GitHub Actions
+gates is the current milestone. Until marks are in place, CI runs all
+fast-path and Spark-path tests together under `-m "not live"`.
+
 ### Running Tests
 
 Execute the full test suite and measure branch coverage from the project root:
@@ -87,6 +117,9 @@ coverage run -m pytest
 
 # Display the coverage report
 coverage report -m
+
+# Run only tests that do not require network access
+pytest -m "not live"
 ```
 
 ## Installation
@@ -133,7 +166,7 @@ Pinned Airflow provider versions are in `requirements-airflow.lock.txt`.
 
 ## Status
 
-Bronze layer complete. All ingestion stubs replaced with tested implementations:
+Silver layer complete. All transformation stubs replaced with tested implementations:
 
 - Runtime packaging complete
 - Local Spark execution verified
@@ -151,16 +184,22 @@ Bronze layer complete. All ingestion stubs replaced with tested implementations:
 - Schema equivalence layer absorbs TLC source instability: case/underscore
   normalization, numeric type family (`bigint` ↔ `double`), timestamp family
   (`timestamp` ↔ `timestamp_ntz`), validated against live February 2023 data
-- Integration tests in two tiers: Tier 1 (CI-safe, synthetic fixtures),
-  Tier 2 (`@pytest.mark.live`, real TLC downloads)
-- Silver transformation scaffolded: contract module with two-phase domain
-  constraint model (11 rejection reasons covering integrality, null policy,
-  and domain rules), `transform/` package with typed request, normalization,
-  validation, and orchestration modules, reconciliation invariant
+- Silver contract module complete (19-field normalized schema, 11 rejection
+  reasons in two phases, `TypeNormalization` specs, `DomainConstraint`
+  metadata, slice validation)
+- Silver transformation implemented: two-phase validation sandwich
+  (pre-normalization constraint tagging → type normalization → post-normalization
+  domain checks), accepted/rejected partition split, reconciliation invariant
   (`bronze_count == accepted_count + rejected_count`) enforced structurally
-- 360+ tests, 100% branch coverage on listed modules
-**Next milestone:** Silver layer implementation — fill transformation stubs,
-integration tests, reconciliation tests.
+  at result construction time
+- Integration tests in two tiers per layer: Tier 1 (CI-safe, synthetic
+  fixtures, zero mocks), Tier 2 (`@pytest.mark.live`, real source data)
+- 429 tests (total), 100% branch coverage on listed modules
+
+**Next milestone:** CI and test-tier infrastructure — pytest mark-based
+separation of fast, Spark, live, and audit test tiers with corresponding
+GitHub Actions gates (lint, test, import smoke), coverage reporting, and
+`python-dotenv` dependency cleanup. Experiment layer follows.
 
 ## Roadmap
 

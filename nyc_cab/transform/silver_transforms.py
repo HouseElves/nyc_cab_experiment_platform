@@ -17,6 +17,9 @@ Module Constraints
 """
 
 from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+
+from nyc_cab.contracts.silver import SILVER_YELLOW_TYPE_NORMALIZATIONS
 
 
 def apply_type_normalizations(df: DataFrame) -> DataFrame:
@@ -26,4 +29,6 @@ def apply_type_normalizations(df: DataFrame) -> DataFrame:
     (e.g. ``passenger_count`` double → int, ``RatecodeID`` double → int).
     Returns a new DataFrame with the casts applied.
     """
-    raise NotImplementedError
+    for norm in SILVER_YELLOW_TYPE_NORMALIZATIONS:
+        df = df.withColumn(norm.column_name, F.col(norm.column_name).cast(norm.silver_type))
+    return df

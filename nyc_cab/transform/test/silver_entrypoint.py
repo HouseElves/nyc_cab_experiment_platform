@@ -5,29 +5,169 @@ These tests cover:
 
 * :class:`SilverTransformResult` -- the post-transformation result, including
   the reconciliation invariant (``bronze_count == accepted_count +
-  rejected_count``).
-* :func:`transform_silver_month` -- stub verification.
+  rejected_count``), type-check rejection, structural rejection, and
+  ``validity_check`` chaining.
+* :func:`transform_silver_month` -- the 11-step orchestration flow. A synthetic
+  Bronze partition is pre-staged in the expected Hive directory layout so the
+  full pipeline (pre-normalization, type cast, post-normalization, split, write)
+  runs against real data with zero mocks.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import datetime
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+from pyspark.sql import SparkSession
 
 from nyc_cab.config import load_config
+from nyc_cab.contracts.silver import RejectionReason
 from nyc_cab.exceptions import InvalidRequestError
 from nyc_cab.transform.silver_entrypoint import SilverTransformResult, transform_silver_month
 from nyc_cab.transform.silver_request import SilverTransformRequest
 
 
+# ---------------------------------------------------------------------------
+# Constants and schema
+# ---------------------------------------------------------------------------
+
+_CLEAN_COUNT = 5
+_DIRTY_COUNT = 5
+_TOTAL_COUNT = _CLEAN_COUNT + _DIRTY_COUNT
+
+# Sentinel datetime values used across the dirty partition fixture.
+_PICKUP  = datetime.datetime(2023, 1, 15, 10, 0, 0)
+_DROPOFF = datetime.datetime(2023, 1, 15, 11, 0, 0)
+# Reversed pickup fires PICKUP_AFTER_DROPOFF when paired with _DROPOFF.
+_REVERSED_PICKUP = datetime.datetime(2023, 1, 15, 12, 0, 0)
+
+# Minimal Bronze schema: only the six fields Silver actually processes.
+# passenger_count and RatecodeID are double here (Bronze type); Silver
+# normalizes them to int. The remaining 13 Bronze columns are not required
+# for Silver correctness and are omitted for fixture clarity.
+_BRONZE_ARROW_SCHEMA = pa.schema([
+    pa.field("passenger_count",      pa.float64(), nullable=True),
+    pa.field("RatecodeID",           pa.float64(), nullable=True),
+    pa.field("fare_amount",          pa.float64(), nullable=True),
+    pa.field("trip_distance",        pa.float64(), nullable=True),
+    pa.field("tpep_pickup_datetime",  pa.timestamp("us"), nullable=True),
+    pa.field("tpep_dropoff_datetime", pa.timestamp("us"), nullable=True),
+])
+
+
+# ---------------------------------------------------------------------------
+# Spark fixture (module-scoped)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def spark(tmp_path_factory):
+    """Create a local Spark session for Silver entrypoint tests."""
+    warehouse = tmp_path_factory.mktemp("spark_warehouse")
+    session = (
+        SparkSession.builder
+        .master("local[1]")
+        .appName("test_silver_entrypoint")
+        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
+        .config("spark.sql.warehouse.dir", str(warehouse))
+        .config("spark.driver.extraJavaOptions", "-Dderby.system.home=" + str(warehouse))
+        .getOrCreate()
+    )
+    yield session
+    session.stop()
+
+
+# ---------------------------------------------------------------------------
+# Bronze partition helpers
+# ---------------------------------------------------------------------------
+
+
+def _bronze_partition_path(data_root: Path) -> Path:
+    """Return the Bronze Hive partition directory for yellow/2023/01."""
+    return data_root / "bronze" / "cab_type=yellow" / "year=2023" / "month=1"
+
+
+def _write_clean_bronze_partition(data_root: Path, row_count: int = _CLEAN_COUNT) -> Path:
+    """Write a synthetic Bronze partition where all rows pass Silver constraints.
+
+    Every row has an integral passenger_count and RatecodeID, non-null
+    constraint-checked fields, non-negative amounts, and pickup before
+    dropoff. Returns the partition directory path.
+    """
+    partition_path = _bronze_partition_path(data_root)
+    partition_path.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "passenger_count":      pa.array([1.0]     * row_count, type=pa.float64()),
+            "RatecodeID":           pa.array([1.0]     * row_count, type=pa.float64()),
+            "fare_amount":          pa.array([10.0]    * row_count, type=pa.float64()),
+            "trip_distance":        pa.array([2.0]     * row_count, type=pa.float64()),
+            "tpep_pickup_datetime":  pa.array([_PICKUP]  * row_count, type=pa.timestamp("us")),
+            "tpep_dropoff_datetime": pa.array([_DROPOFF] * row_count, type=pa.timestamp("us")),
+        },
+        schema=_BRONZE_ARROW_SCHEMA,
+    )
+    pq.write_table(table, str(partition_path / "data.parquet"))
+    return partition_path
+
+
+def _write_dirty_bronze_partition(data_root: Path) -> Path:
+    """Write a Bronze partition with _CLEAN_COUNT clean rows and _DIRTY_COUNT dirty rows.
+
+    The dirty rows inject exactly one Silver constraint violation each:
+
+    - Index 5: passenger_count=1.5  → NON_INTEGRAL_PASSENGER_COUNT
+    - Index 6: fare_amount=None     → NULL_FARE_AMOUNT
+    - Index 7: trip_distance=-1.0   → NEGATIVE_DISTANCE
+    - Index 8: pickup after dropoff → PICKUP_AFTER_DROPOFF
+    - Index 9: fare_amount=-5.0     → NEGATIVE_FARE
+
+    Returns the partition directory path.
+    """
+    partition_path = _bronze_partition_path(data_root)
+    partition_path.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "passenger_count": pa.array(
+                [1.0] * _CLEAN_COUNT + [1.5, 1.0, 1.0, 1.0, 1.0],
+                type=pa.float64(),
+            ),
+            "RatecodeID": pa.array([1.0] * _TOTAL_COUNT, type=pa.float64()),
+            "fare_amount": pa.array(
+                [10.0] * _CLEAN_COUNT + [10.0, None, 10.0, 10.0, -5.0],
+                type=pa.float64(),
+            ),
+            "trip_distance": pa.array(
+                [2.0] * _CLEAN_COUNT + [2.0, 2.0, -1.0, 2.0, 2.0],
+                type=pa.float64(),
+            ),
+            "tpep_pickup_datetime": pa.array(
+                [_PICKUP] * _CLEAN_COUNT + [_PICKUP, _PICKUP, _PICKUP, _REVERSED_PICKUP, _PICKUP],
+                type=pa.timestamp("us"),
+            ),
+            "tpep_dropoff_datetime": pa.array(
+                [_DROPOFF] * _TOTAL_COUNT,
+                type=pa.timestamp("us"),
+            ),
+        },
+        schema=_BRONZE_ARROW_SCHEMA,
+    )
+    pq.write_table(table, str(partition_path / "data.parquet"))
+    return partition_path
+
+
 def _request() -> SilverTransformRequest:
-    """Build a valid Silver transform request for tests."""
+    """Build a valid Silver transform request for yellow/2023/01."""
     return SilverTransformRequest.create_validated("yellow", 2023, 1)
 
 
-# --- SilverTransformResult: happy paths -------------------------------------
+# ---------------------------------------------------------------------------
+# SilverTransformResult: happy paths
+# ---------------------------------------------------------------------------
 
 
 def test_result_create_validated_happy_path(tmp_path: Path) -> None:
@@ -80,7 +220,9 @@ def test_result_accepts_nonexistent_partition_paths(tmp_path: Path) -> None:
     assert not result.silver_rejected_partition_path.exists()
 
 
-# --- SilverTransformResult: type-check rejections ---------------------------
+# ---------------------------------------------------------------------------
+# SilverTransformResult: type-check rejections
+# ---------------------------------------------------------------------------
 
 
 def test_result_rejects_non_request(tmp_path: Path) -> None:
@@ -112,7 +254,9 @@ def test_result_rejects_bool_bronze_count(tmp_path: Path) -> None:
     assert ("bronze_count", True) in info.value.violations
 
 
-# --- SilverTransformResult: structural rejections ---------------------------
+# ---------------------------------------------------------------------------
+# SilverTransformResult: structural rejections
+# ---------------------------------------------------------------------------
 
 
 def test_result_rejects_negative_bronze_count(tmp_path: Path) -> None:
@@ -146,7 +290,9 @@ def test_result_rejects_file_as_silver_path(tmp_path: Path) -> None:
     assert ("silver_partition_path", file_path) in info.value.violations
 
 
-# --- Reconciliation invariant -----------------------------------------------
+# ---------------------------------------------------------------------------
+# Reconciliation invariant
+# ---------------------------------------------------------------------------
 
 
 def test_result_rejects_inconsistent_counts(tmp_path: Path) -> None:
@@ -177,7 +323,9 @@ def test_reconciliation_passes_at_zero(tmp_path: Path) -> None:
     assert result.bronze_count == 0
 
 
-# --- validity_check chaining ------------------------------------------------
+# ---------------------------------------------------------------------------
+# validity_check chaining
+# ---------------------------------------------------------------------------
 
 
 def test_result_chaining_catches_invalid_request(tmp_path: Path) -> None:
@@ -191,7 +339,9 @@ def test_result_chaining_catches_invalid_request(tmp_path: Path) -> None:
     assert "request" in names
 
 
-# --- Frozenness -------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Frozenness
+# ---------------------------------------------------------------------------
 
 
 def test_result_is_frozen(tmp_path: Path) -> None:
@@ -203,12 +353,220 @@ def test_result_is_frozen(tmp_path: Path) -> None:
         result.bronze_count = 200  # type: ignore[misc]
 
 
-# --- transform_silver_month stub -------------------------------------------
+# ---------------------------------------------------------------------------
+# transform_silver_month: contract rejection (no Spark required)
+# ---------------------------------------------------------------------------
 
 
-def test_transform_silver_month_raises_not_implemented(tmp_path: Path) -> None:
-    """The stub raises NotImplementedError until implemented."""
+def test_transform_rejects_unsupported_period(tmp_path: Path) -> None:
+    """An unsupported period raises InvalidRequestError before any Spark interaction."""
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    bad_request = SilverTransformRequest.create_validated("yellow", 2023, 6)
+    with pytest.raises(InvalidRequestError) as info:
+        transform_silver_month(None, runtime, bad_request)  # type: ignore[arg-type]
+    names = [v[0] for v in info.value.violations]
+    assert "period" in names
+
+
+def test_transform_rejects_unsupported_cab_type(tmp_path: Path) -> None:
+    """An unsupported cab type raises InvalidRequestError before any Spark interaction."""
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    bad_request = SilverTransformRequest.create_validated("green", 2023, 1)
+    with pytest.raises(InvalidRequestError) as info:
+        transform_silver_month(None, runtime, bad_request)  # type: ignore[arg-type]
+    names = [v[0] for v in info.value.violations]
+    assert "cab_type" in names
+
+
+# ---------------------------------------------------------------------------
+# transform_silver_month: happy path (clean partition)
+# ---------------------------------------------------------------------------
+
+
+def test_transform_produces_valid_result(spark, tmp_path) -> None:
+    """A clean Bronze partition produces a valid SilverTransformResult."""
+    _write_clean_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert isinstance(result, SilverTransformResult)
+    assert result.is_valid()
+
+
+def test_transform_all_clean_rows_accepted(spark, tmp_path) -> None:
+    """All rows in a clean partition land in accepted with zero rejected."""
+    _write_clean_bronze_partition(tmp_path, row_count=_CLEAN_COUNT)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert result.accepted_count == _CLEAN_COUNT
+    assert result.rejected_count == 0
+
+
+def test_transform_bronze_count_matches_source(spark, tmp_path) -> None:
+    """The bronze_count in the result equals the number of rows in the source partition."""
+    _write_clean_bronze_partition(tmp_path, row_count=_CLEAN_COUNT)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert result.bronze_count == _CLEAN_COUNT
+
+
+def test_transform_result_traces_to_request(spark, tmp_path) -> None:
+    """The result's request field is the original request object."""
+    _write_clean_bronze_partition(tmp_path)
     runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
     request = _request()
-    with pytest.raises(NotImplementedError):
-        transform_silver_month(None, runtime, request)  # type: ignore[arg-type]
+    result = transform_silver_month(spark, runtime, request)
+    assert result.request is request
+
+
+# ---------------------------------------------------------------------------
+# transform_silver_month: partition layout
+# ---------------------------------------------------------------------------
+
+
+def test_transform_writes_silver_partition_directory(spark, tmp_path) -> None:
+    """The transform creates the Silver accepted partition directory on disk."""
+    _write_clean_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert result.silver_partition_path.exists()
+    assert result.silver_partition_path.is_dir()
+    assert list(result.silver_partition_path.glob("*.parquet"))
+
+
+def test_transform_writes_rejected_partition_directory(spark, tmp_path) -> None:
+    """The transform creates the Silver rejected partition directory on disk."""
+    _write_dirty_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert result.silver_rejected_partition_path.exists()
+    assert result.silver_rejected_partition_path.is_dir()
+    assert list(result.silver_rejected_partition_path.glob("*.parquet"))
+
+
+def test_transform_silver_partition_uses_hive_layout(spark, tmp_path) -> None:
+    """The Silver accepted partition path follows the cab_type/year/month Hive layout."""
+    _write_clean_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    parts = result.silver_partition_path.parts
+    assert "cab_type=yellow" in parts
+    assert "year=2023" in parts
+    assert "month=1" in parts
+
+
+def test_transform_rejected_partition_uses_hive_layout(spark, tmp_path) -> None:
+    """The Silver rejected partition path follows the cab_type/year/month Hive layout."""
+    _write_dirty_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    parts = result.silver_rejected_partition_path.parts
+    assert "cab_type=yellow" in parts
+    assert "year=2023" in parts
+    assert "month=1" in parts
+
+
+# ---------------------------------------------------------------------------
+# transform_silver_month: accepted output schema
+# ---------------------------------------------------------------------------
+
+
+def test_transform_accepted_drops_rejection_column(spark, tmp_path) -> None:
+    """The accepted partition does not contain the ``_rejection_reasons`` column."""
+    _write_clean_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    accepted_df = spark.read.parquet(str(result.silver_partition_path))
+    assert "_rejection_reasons" not in accepted_df.columns
+
+
+def test_transform_accepted_normalizes_passenger_count_to_int(spark, tmp_path) -> None:
+    """The accepted partition stores passenger_count as int (Silver type)."""
+    _write_clean_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    accepted_df = spark.read.parquet(str(result.silver_partition_path))
+    schema_map = {f.name: f.dataType.simpleString() for f in accepted_df.schema.fields}
+    assert schema_map["passenger_count"] == "int"
+
+
+def test_transform_accepted_normalizes_ratecode_to_int(spark, tmp_path) -> None:
+    """The accepted partition stores RatecodeID as int (Silver type)."""
+    _write_clean_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    accepted_df = spark.read.parquet(str(result.silver_partition_path))
+    schema_map = {f.name: f.dataType.simpleString() for f in accepted_df.schema.fields}
+    assert schema_map["RatecodeID"] == "int"
+
+
+# ---------------------------------------------------------------------------
+# transform_silver_month: rejected output and reconciliation
+# ---------------------------------------------------------------------------
+
+
+def test_transform_reconciliation_invariant_with_dirty_partition(spark, tmp_path) -> None:
+    """bronze_count == accepted_count + rejected_count holds for a mixed partition."""
+    _write_dirty_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert result.bronze_count == result.accepted_count + result.rejected_count
+    assert result.bronze_count == _TOTAL_COUNT
+
+
+def test_transform_dirty_counts_match_expected_violations(spark, tmp_path) -> None:
+    """Exactly _DIRTY_COUNT rows are rejected and _CLEAN_COUNT accepted."""
+    _write_dirty_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    assert result.accepted_count == _CLEAN_COUNT
+    assert result.rejected_count == _DIRTY_COUNT
+
+
+def test_transform_rejected_retains_rejection_column(spark, tmp_path) -> None:
+    """The rejected partition retains the ``_rejection_reasons`` array column."""
+    _write_dirty_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    rejected_df = spark.read.parquet(str(result.silver_rejected_partition_path))
+    assert "_rejection_reasons" in rejected_df.columns
+
+
+def test_transform_known_violations_appear_in_rejected(spark, tmp_path) -> None:
+    """Each of the five injected violation reasons appears in the rejected partition."""
+    _write_dirty_bronze_partition(tmp_path)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    result = transform_silver_month(spark, runtime, _request())
+    rejected_df = spark.read.parquet(str(result.silver_rejected_partition_path))
+    all_reasons = {
+        reason
+        for row in rejected_df.collect()
+        for reason in row["_rejection_reasons"]
+    }
+    assert RejectionReason.NON_INTEGRAL_PASSENGER_COUNT.value in all_reasons
+    assert RejectionReason.NULL_FARE_AMOUNT.value             in all_reasons
+    assert RejectionReason.NEGATIVE_DISTANCE.value            in all_reasons
+    assert RejectionReason.PICKUP_AFTER_DROPOFF.value         in all_reasons
+    assert RejectionReason.NEGATIVE_FARE.value                in all_reasons
+
+
+# ---------------------------------------------------------------------------
+# transform_silver_month: idempotent re-execution
+# ---------------------------------------------------------------------------
+
+
+def test_transform_idempotent_reexecution(spark, tmp_path) -> None:
+    """Running the same transform twice produces identical counts without error."""
+    _write_clean_bronze_partition(tmp_path, row_count=_CLEAN_COUNT)
+    runtime = load_config({"NYC_CAB_DATA_ROOT": str(tmp_path)})
+    request = _request()
+
+    first  = transform_silver_month(spark, runtime, request)
+    second = transform_silver_month(spark, runtime, request)
+
+    assert first.accepted_count == second.accepted_count
+    assert first.rejected_count == second.rejected_count
+
+    # Read-back count assertion: proves partition overwrite, not append.
+    readback_count = spark.read.parquet(str(second.silver_partition_path)).count()
+    assert readback_count == _CLEAN_COUNT
+ 
