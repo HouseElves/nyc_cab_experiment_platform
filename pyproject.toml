@@ -34,9 +34,13 @@ dev = [
     "sphinx",
     "sphinx-rtd-theme"
 ]
+events = [
+    "confluent-kafka",
+    "psycopg[binary]>=3.2"
+]
 
 [project.scripts]
 nyc-cab = "nyc_cab.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["nyc_cab*"]
+include = ["nyc_cab*", "nyc_cab_events*"]

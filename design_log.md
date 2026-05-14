@@ -743,6 +743,84 @@ This mirrors prior production work translating governed batch analytics into
 event-shaped processing streams, while using public data and project-owned
 models. The platform and domain differ; the architectural pattern is the same.
 
+### 32. Kafka Client Is `confluent-kafka-python`
+
+The `nyc_cab_events` package uses `confluent-kafka-python` as its Kafka
+client. `kafka-python` is explicitly rejected.
+
+#### Rationale
+
+`confluent-kafka-python` wraps `librdkafka`, the same C client that Confluent
+ships in its own deployments. This gives the project three concrete things
+that the pure-Python alternative does not:
+
+1. **Maintenance.** `librdkafka` is actively maintained on Confluent's
+   release cadence; `kafka-python` has gone through extended quiet periods,
+   and several of its known issues with newer broker versions remain open.
+2. **Performance.** The C client is materially faster, both for produce and
+   for poll loops, which matters once the producer is replaying entire
+   monthly Silver partitions.
+3. **Forward compatibility with managed Kafka.** If the platform ever moves
+   from the docker-compose broker to Confluent Cloud or a similar managed
+   service, the client and its semantics carry over without rewrite.
+
+The tradeoff is a C dependency at install time, which is handled via the
+binary wheel and is unobtrusive in practice. The decision is recorded so
+that an unscoped "let's just `pip install kafka-python`" PR has something
+explicit to bounce off of.
+
+### 33. Event Time Bucketing Uses `tpep_pickup_datetime`
+
+The `hour` field on `TripCompleted` events is derived from
+`tpep_pickup_datetime`, not from event-production wall-clock time.
+Aggregations in the consumer key on the event-time hour. Wall-clock time is
+carried separately as `produced_at` for operational diagnostics.
+
+#### Rationale
+
+The platform's analytical question is "what happened in the city in this
+hour," not "what did the producer emit in this hour." Bucketing on
+processing time conflates the two and makes reconciliation against Silver
+impossible: Silver counts are inherently event-time-aligned, since the
+partition itself is `(cab_type, year, month)` derived from the source TLC
+file's reporting month.
+
+Carrying `produced_at` separately keeps the operational signal — when did
+the producer actually send this event — visible without polluting the
+analytical signal.
+
+### 34. Postgres Is the Aggregate Sink
+
+The consumer writes hourly aggregates into a Postgres `trip_completed_hourly`
+table, not back into Parquet.
+
+#### Rationale
+
+Two pressures point at Postgres rather than continuing the Parquet pattern:
+
+1. **Deliberate tech variation.** Bronze and Silver both write
+   Hive-partitioned Parquet. Continuing that pattern in the consumer makes
+   the platform a single-sink platform in disguise. Bringing in a second
+   sink class — a transactional database — exercises a real production
+   concern: aggregate stores frequently sit in OLTP-shaped systems with
+   indexes and upsert semantics, not in object stores.
+2. **Upsert semantics make idempotency cheap.**
+   `INSERT ... ON CONFLICT (cab_type, year, month, hour) DO UPDATE` gives
+   the consumer end-to-end idempotency without per-event deduplication
+   state. Replaying the consumer against the same partition converges to
+   the same row state in `trip_completed_hourly`.
+
+Alternatives considered:
+
+- **Parquet aggregates.** Rejected for (1) and because partition-level
+  upsert is awkward (it forces full-partition rewrite for any in-partition
+  change).
+- **SQLite.** Rejected because it would not exercise a network-attached
+  database, and the integration test bed already justifies a Postgres
+  container.
+- **DuckDB.** A real candidate for read-side analytics, but for the
+  write-and-upsert role Postgres is the cleaner choice.
+
 ## Architectural Guardrails
 
 To prevent the architecture from drifting into monolithic design:

@@ -1,6 +1,6 @@
 # NYC Cab Experiment Platform
 
-**Deterministic Experimentation Metrics on Event-Scale Public Data**
+**Deterministic Experimentation Metrics on Enterprise-Scale Public Data**
 
 ## Overview
 
@@ -22,7 +22,8 @@ This system models key properties of modern experimentation platforms:
 | Layer | Description | Status |
 | --- | --- | --- |
 | **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Complete |
-| **Silver** | Normalized and validated trip events with derived metrics | Complete |
+| **Silver** | Normalized and validated trip records with derived metrics | Complete |
+| **Events** | Batch-event bridge: deterministic event emission from Silver, hourly aggregates in Postgres, reconciliation back against Silver counts | Scaffolded |
 | **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
 | **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
 
@@ -57,7 +58,7 @@ local `test/` directory, where `test/module.py` contains tests for
 These local `test/` directories are authoritative for module-level coverage.
 The minimum standard for push to GitHub is **90% branch coverage** for
 module-level tests. The platform currently meets this standard at 100% branch
-coverage across 409 tests on listed modules.
+coverage across 519 tests on listed modules.
 
 Root-level `test/` suites cover integration and functional concerns.
 Bronze and Silver integration testing is each split into two tiers:
@@ -80,6 +81,11 @@ Bronze and Silver integration testing is each split into two tiers:
   real TLC downloads for January and February 2023, verifies plausible
   accepted/rejected ratios, reconciliation, partition output, and
   February schema-drift compatibility against live source data.
+- **Tier 1 (`test/events_integration.py`):** 4 tests marked
+  `@pytest.mark.kafka` and `@pytest.mark.postgres`, currently scaffolded
+  against the `NotImplementedError` stubs in the events package. Will drive
+  the full Silver → producer → Kafka → consumer → Postgres → reconcile loop
+  once the stubs land. Requires the project `docker-compose.yml`.
 
 Expected future root-level coverage includes:
 
@@ -103,12 +109,15 @@ remains trusted rather than avoided. The intended tier structure is:
 - **Audit path (release / manual):** coverage report, Sphinx docs build,
   full local pipeline run, reproducibility check.
 
-All 429 tests carry a `unit`, `spark`, or `live` mark. Mixed-responsibility
-files (result types alongside orchestration tests) use per-function marks;
-homogeneous files use a module-level `pytestmark`. CI runs fast-path and
-Spark-path tests together under `-m "not live"` until the GitHub Actions
-jobs are split by tier; the marks are in place for that split to be
-mechanical when it lands.
+All 543 tests carry a `unit`, `spark`, `live`, `kafka`, or `postgres` mark
+(or some combination). The `kafka` and `postgres` marks are orthogonal:
+a Tier 1 events integration test typically carries both, since it exercises
+the producer-through-sink path. Mixed-responsibility files (result types
+alongside orchestration tests) use per-function marks; homogeneous files
+use a module-level `pytestmark`. CI runs fast-path and Spark-path tests
+together under `-m "not live and not kafka and not postgres"` until the
+GitHub Actions jobs are split by tier; the marks are in place for that
+split to be mechanical when it lands.
 
 ### Running Tests
 
@@ -132,6 +141,9 @@ pytest -m "not live"
 
 # Live tests only — requires network access
 pytest -m live
+
+# Events integration tests — requires docker-compose up
+pytest -m "kafka and postgres"
 ```
 
 ## Installation
@@ -176,6 +188,29 @@ airflow db migrate
 
 Pinned Airflow provider versions are in `requirements-airflow.lock.txt`.
 
+### Events (Kafka + Postgres)
+
+The events package is an optional integration. Install the locked event
+dependencies alongside the core environment:
+
+```bash
+pip install -r requirements.lock.txt
+pip install -r requirements-events.lock.txt
+pip install -e '.[events]'
+```
+
+Local Kafka and Postgres are provisioned via the project `docker-compose.yml`:
+
+```bash
+docker compose up -d zookeeper kafka postgres
+```
+
+Container names are deterministic (`nyc_cab_events_zookeeper`,
+`nyc_cab_events_kafka`, `nyc_cab_events_postgres`) and all three services
+have health checks. Kafka auto-topic-creation is intentionally off; the
+producer creates `trip.completed.v1` and `trip.completed.v1.invalid`
+explicitly so the test bed mirrors the deployed surface.
+
 ## Status
 
 Silver layer complete. All transformation stubs replaced with tested implementations:
@@ -206,18 +241,47 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   at result construction time
 - Integration tests in two tiers per layer: Tier 1 (CI-safe, synthetic
   fixtures, zero mocks), Tier 2 (`@pytest.mark.live`, real source data)
-- All 429 tests annotated with `unit`, `spark`, or `live` pytest marks;
-  mixed-responsibility files carry per-function marks
+- All 543 tests annotated with `unit`, `spark`, `live`, `kafka`, or
+  `postgres` pytest marks; mixed-responsibility files carry per-function marks
 - GitHub Actions CI live: three independent jobs (lint, test, import smoke);
   pylint 10/10 gate, 90% branch coverage gate, clean-install import gate
-- 429 tests, 100% branch coverage on listed modules
+- 543 tests, 100% branch coverage on listed modules
+- `nyc_cab_events` package scaffolded parallel to `nyc_cab` in the same wheel:
+  four subpackages (`contracts`, `producer`, `consumer`, `sink`) implementing
+  the batch-event bridge described in design log decision 31
+- `TripCompleted` event contract complete: nine-field validated dataclass,
+  topic constants (`trip.completed.v1`, `trip.completed.v1.invalid`),
+  quarantine routing function
+- Producer, consumer, and sink modules ship validated config and result
+  dataclasses; the producer's reconciliation invariant
+  (`silver_read_count == events_emitted + events_quarantined`) and the sink's
+  derivation-consistency check on `ReconciliationResult` are both enforced
+  structurally at construction time
+- Heavy operations (`derive_event_id`, `produce_trip_completed_events`,
+  `consume_and_aggregate`, `ensure_table`, `upsert_hourly_counts`,
+  `reconcile_against_silver`) are `NotImplementedError` stubs, each covered
+  by a matching `pytest.raises` test per design log decision 25
+- `docker-compose.yml` brings up Kafka 7.6 + Zookeeper + Postgres 16 with
+  deterministic container names and health checks; topic auto-creation is
+  intentionally off
+- Optional dependencies group `events` added to `pyproject.toml`
+  (`confluent-kafka`, `psycopg[binary]>=3.2`); companion
+  `requirements-events.lock.txt` pins the four-package transitive closure
+- New pytest markers `kafka` and `postgres` registered as orthogonal markers;
+  testpaths expanded for the four events subpackages
+- 114 new tests, all currently `unit`-marked, pylint 10/10 on the new package,
+  100% branch coverage on `nyc_cab_events`
+- Design log decisions 32, 33, 34 record the Kafka client choice, the
+  event-time bucketing rule, and the Postgres-as-sink decision
 
-**Next milestone:** `nyc_cab_events` — Kafka scaffolding for the
-`trip.completed.v1` event. Deterministic producer from Silver accepted
-records, contract validator, invalid-event quarantine topic, idempotent
-consumer, hourly Postgres aggregate sink, and reconciliation against
-Silver batch counts. Implements the batch-event bridge pattern
-(design log decision 31).
+**Next milestone:** complete the `TripCompleted` wire-format contract.
+Deterministic `event_id` derivation (SHA-256 over the source-row tuple
+already committed in the producer stub docstring), stable `event_key`
+for Kafka partition routing, explicit `schema_version` field for wire-format
+versioning, JSON serialize/deserialize pair, and tests covering
+determinism across re-runs and rejection of malformed payloads on
+deserialization. Sets up the subsequent milestone: a deterministic
+trip-completed producer working solely off the Silver layer.
 
 ## Roadmap
 
