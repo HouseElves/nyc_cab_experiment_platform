@@ -16,7 +16,6 @@ from nyc_cab_events.contracts.events import (
 from nyc_cab_events.producer.trip_completed import (
     TripCompletedProducerConfig,
     TripCompletedProducerResult,
-    derive_event_id,
     produce_trip_completed_events,
 )
 
@@ -241,12 +240,6 @@ def test_result_is_frozen(silver_path: Path) -> None:
 
 
 # --- Stub coverage (decision 25) --------------------------------------------
-
-
-def test_derive_event_id_is_not_implemented() -> None:
-    """``derive_event_id`` raises ``NotImplementedError`` until implemented."""
-    with pytest.raises(NotImplementedError):
-        derive_event_id(object())
 
 
 def test_produce_trip_completed_events_is_not_implemented(silver_path: Path) -> None:

@@ -4,9 +4,9 @@
 
 ## Overview
 
-The NYC Cab Experiment Platform implements a distributed experimentation
-metrics pipeline using Apache Spark and Apache Airflow on publicly available
-NYC Taxi trip records.
+The NYC Cab Experiment Platform implements a deterministic experimentation
+metrics platform on public NYC Taxi data, currently centered on Spark
+batch processing with a Kafka/Postgres event bridge in progress.
 
 This system models key properties of modern experimentation platforms:
 
@@ -14,7 +14,7 @@ This system models key properties of modern experimentation platforms:
 - Partition-aware ingestion
 - Versioned metric computation
 - Reproducible recomputation
-- Idempotent Airflow backfills
+- Idempotent monthly backfills
 - Explicit data contract validation
 
 ## Architecture
@@ -24,6 +24,7 @@ This system models key properties of modern experimentation platforms:
 | **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Complete |
 | **Silver** | Normalized and validated trip records with derived metrics | Complete |
 | **Events** | Batch-event bridge: deterministic event emission from Silver, hourly aggregates in Postgres, reconciliation back against Silver counts | Scaffolded |
+| **Orchestration** | Airflow-managed monthly replay/backfill DAGs for Bronze → Silver → Events reconciliation | Planned |
 | **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
 | **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
 
@@ -58,7 +59,7 @@ local `test/` directory, where `test/module.py` contains tests for
 These local `test/` directories are authoritative for module-level coverage.
 The minimum standard for push to GitHub is **90% branch coverage** for
 module-level tests. The platform currently meets this standard at 100% branch
-coverage across 519 tests on listed modules.
+coverage across 595 tests on listed modules.
 
 Root-level `test/` suites cover integration and functional concerns.
 Bronze and Silver integration testing is each split into two tiers:
@@ -109,7 +110,7 @@ remains trusted rather than avoided. The intended tier structure is:
 - **Audit path (release / manual):** coverage report, Sphinx docs build,
   full local pipeline run, reproducibility check.
 
-All 543 tests carry a `unit`, `spark`, `live`, `kafka`, or `postgres` mark
+All tests carry a `unit`, `spark`, `live`, `kafka`, or `postgres` mark
 (or some combination). The `kafka` and `postgres` marks are orthogonal:
 a Tier 1 events integration test typically carries both, since it exercises
 the producer-through-sink path. Mixed-responsibility files (result types
@@ -166,17 +167,16 @@ used by the project.
 Spark is executed locally using PySpark. No external cluster is required
 for baseline execution.
 
-### Airflow
+### Airflow (planned)
 
-Airflow is not a package dependency and must be installed separately using
-the official constraints file.
-
-Airflow must be installed in a dedicated Python environment separate from
-the core Spark/docs/test environment. This separation is required because
-Airflow's constrained dependency set causes conflicts with the Sphinx-based
-documentation toolchain used by the core project.
-
-The recommended Airflow installation is:
+Airflow is not currently a project dependency. It will be introduced in
+the orchestration milestone (see the Architecture table above) for
+monthly replay/backfill DAGs spanning Bronze → Silver → Events
+reconciliation. The install recipe and pinned providers are kept here
+so that work can start cleanly when the milestone lands; Airflow will
+live in a dedicated Python environment separate from the core
+Spark/docs/test environment because Airflow's constrained dependency
+set conflicts with the Sphinx-based documentation toolchain.
 
 ```bash
 pip install "apache-airflow[postgres]==2.9.1" \
@@ -217,7 +217,6 @@ Silver layer complete. All transformation stubs replaced with tested implementat
 
 - Runtime packaging complete
 - Local Spark execution verified
-- Airflow environment isolated
 - Dependency boundaries established
 - Validation protocol established (`_Validated` mix-in with type-check
   specifications, structural-tier and semantic-tier separation, `validity_check`
@@ -241,26 +240,31 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   at result construction time
 - Integration tests in two tiers per layer: Tier 1 (CI-safe, synthetic
   fixtures, zero mocks), Tier 2 (`@pytest.mark.live`, real source data)
-- All 543 tests annotated with `unit`, `spark`, `live`, `kafka`, or
+- All 619 tests annotated with `unit`, `spark`, `live`, `kafka`, or
   `postgres` pytest marks; mixed-responsibility files carry per-function marks
 - GitHub Actions CI live: three independent jobs (lint, test, import smoke);
   pylint 10/10 gate, 90% branch coverage gate, clean-install import gate
-- 543 tests, 100% branch coverage on listed modules
+- 619 tests, 100% branch coverage on listed modules
 - `nyc_cab_events` package scaffolded parallel to `nyc_cab` in the same wheel:
   four subpackages (`contracts`, `producer`, `consumer`, `sink`) implementing
   the batch-event bridge described in design log decision 31
-- `TripCompleted` event contract complete: nine-field validated dataclass,
-  topic constants (`trip.completed.v1`, `trip.completed.v1.invalid`),
-  quarantine routing function
+- `TripCompleted` wire-format contract complete: ten-field validated dataclass
+  with `event_id` and `schema_version` envelope fields, topic constants
+  (`trip.completed.v1`, `trip.completed.v1.invalid`), quarantine routing,
+  deterministic `event_id` derivation (SHA-256 over a fixed Silver-row
+  field tuple, truncated to 16 hex chars), hour-grain `event_key` for Kafka
+  partition routing, strict JSON serialize/deserialize with schema-version
+  enforcement, and a dedicated `InvalidEventPayloadError` for wire-format
+  failures
 - Producer, consumer, and sink modules ship validated config and result
   dataclasses; the producer's reconciliation invariant
   (`silver_read_count == events_emitted + events_quarantined`) and the sink's
   derivation-consistency check on `ReconciliationResult` are both enforced
   structurally at construction time
-- Heavy operations (`derive_event_id`, `produce_trip_completed_events`,
-  `consume_and_aggregate`, `ensure_table`, `upsert_hourly_counts`,
-  `reconcile_against_silver`) are `NotImplementedError` stubs, each covered
-  by a matching `pytest.raises` test per design log decision 25
+- Heavy operations (`produce_trip_completed_events`, `consume_and_aggregate`,
+  `ensure_table`, `upsert_hourly_counts`, `reconcile_against_silver`) are
+  `NotImplementedError` stubs, each covered by a matching `pytest.raises`
+  test per design log decision 25
 - `docker-compose.yml` brings up Kafka 7.6 + Zookeeper + Postgres 16 with
   deterministic container names and health checks; topic auto-creation is
   intentionally off
@@ -269,19 +273,22 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   `requirements-events.lock.txt` pins the four-package transitive closure
 - New pytest markers `kafka` and `postgres` registered as orthogonal markers;
   testpaths expanded for the four events subpackages
-- 114 new tests, all currently `unit`-marked, pylint 10/10 on the new package,
-  100% branch coverage on `nyc_cab_events`
-- Design log decisions 32, 33, 34 record the Kafka client choice, the
-  event-time bucketing rule, and the Postgres-as-sink decision
+- All events-package tests currently `unit`-marked; pylint 10/10 on the
+  new package and 100% branch coverage on the events subpackage
+- Design log decisions 32–38 record the Kafka client choice, the
+  event-time bucketing rule, the Postgres-as-sink decision, the hour-grain
+  `event_key`, contract-level `derive_event_id`, strict schema-version
+  equality, and strict JSON deserialization
 
-**Next milestone:** complete the `TripCompleted` wire-format contract.
-Deterministic `event_id` derivation (SHA-256 over the source-row tuple
-already committed in the producer stub docstring), stable `event_key`
-for Kafka partition routing, explicit `schema_version` field for wire-format
-versioning, JSON serialize/deserialize pair, and tests covering
-determinism across re-runs and rejection of malformed payloads on
-deserialization. Sets up the subsequent milestone: a deterministic
-trip-completed producer working solely off the Silver layer.
+**Next milestone:** deterministic `produce_trip_completed_events`
+implementation, working solely off the Silver layer. Spark reads the
+accepted-partition Parquet, the per-row loop calls
+`derive_event_id` / `TripCompleted.create_validated` / `to_json` /
+`event_key`, the `confluent_kafka.Producer` ships to `trip.completed.v1`
+with quarantine routing on `InvalidRequestError`, and the run returns a
+`TripCompletedProducerResult` whose reconciliation invariant proves the
+loop did not lose rows. Sets up the subsequent milestone: the
+`consume_and_aggregate` consumer plus the Postgres sink implementation.
 
 ## Roadmap
 

@@ -804,11 +804,29 @@ Two pressures point at Postgres rather than continuing the Parquet pattern:
    sink class — a transactional database — exercises a real production
    concern: aggregate stores frequently sit in OLTP-shaped systems with
    indexes and upsert semantics, not in object stores.
-2. **Upsert semantics make idempotency cheap.**
-   `INSERT ... ON CONFLICT (cab_type, year, month, hour) DO UPDATE` gives
-   the consumer end-to-end idempotency without per-event deduplication
-   state. Replaying the consumer against the same partition converges to
-   the same row state in `trip_completed_hourly`.
+2. **Upsert semantics give bounded-replay convergence.**
+   `INSERT ... ON CONFLICT (cab_type, year, month, hour) DO UPDATE SET
+   event_count = EXCLUDED.event_count` faithfully writes whatever count
+   the consumer hands it. This is convergent within a single replay
+   window: if the consumer recomputes the full aggregate for a bounded
+   set of events and overwrites the row, repeated executions converge
+   to the same row state.
+
+   It is **not** cross-replay idempotency. If the producer reruns and
+   emits the same deterministic events twice, and a fresh consumer
+   group reads all copies and aggregates them together, the in-memory
+   aggregator counts each event twice and the upsert faithfully writes
+   the doubled count.  Postgres upsert is doing exactly what it's told;
+   the consumer is the layer that hasn't deduplicated.
+
+   Cross-replay idempotency requires the consumer to dedupe on the
+   deterministic `event_id` (decision 36), via one of: an in-memory
+   seen-set within the run, a persistent `processed_event_ids` table
+   keyed on `event_id`, or a bounded-window read that resets the
+   aggregator on replay. The mechanism is a consumer-implementation
+   decision deferred to that milestone. What Postgres-as-sink
+   contributes is the upsert primitive that any of those mechanisms
+   eventually writes through.
 
 Alternatives considered:
 
@@ -820,6 +838,164 @@ Alternatives considered:
   container.
 - **DuckDB.** A real candidate for read-side analytics, but for the
   write-and-upsert role Postgres is the cleaner choice.
+  
+### 35. Trip-Completed `event_key` Has Hour Grain
+
+The Kafka partition routing key for `TripCompleted` events is
+`cab_type/YYYY/MM/HH` — hour-grain, derived from the event-time hour, not
+the month or any coarser bucket.
+
+#### Rationale
+
+Three pressures converge on hour grain:
+
+1. **Match the aggregation grain.** The consumer aggregates by
+   `(cab_type, year, month, hour)` into `trip_completed_hourly`. If the
+   Kafka key matches that tuple exactly, all events for one row of the
+   aggregate land on the same partition. The aggregator becomes
+   partition-local — no cross-partition coordination needed when writing
+   upserts — and the upsert volume per Kafka partition is bounded by the
+   number of hours represented in that partition's events.
+2. **Healthy partition distribution.** Yellow cab data peaks around ~3M
+   rows per month. Month-grain keying puts every event for a slice on a
+   single partition, which produces a hot partition. Hour-grain keying
+   distributes those rows across ~720 keys per month per `cab_type`, which
+   is comfortable headroom against any reasonable broker partition count
+   without proliferating keys to the point where partition affinity stops
+   meaning anything.
+3. **Replay isolation.** Hour-grain keys keep all records for an aggregate
+   bucket partition-local and make hour-specific replay/filtering straightforward,
+   but Kafka replay still occurs at partition/log granularity.
+   With month-grain keying, replay of one hour pulls the whole month-key
+   partition through the consumer; with hour-grain keying, the surface is
+   exactly the hour being replayed.
+
+Alternatives considered:
+
+- **Month grain (`cab_type/YYYY/MM`).** Rejected for hot-partition risk
+  and replay coarseness.
+- **Per-pickup-location grain (`cab_type/PULocationID`).** Considered
+  briefly. Rejected because there is no downstream query that aggregates
+  by pickup location at the partition level; the aggregate is hourly, so
+  hourly is the right key.
+- **No key (round-robin distribution).** Rejected because round-robin
+  destroys the partition-local property and forces the aggregator to be
+  global state.
+
+### 36. `derive_event_id` Is a Contract-Level Pure Function
+
+The deterministic `event_id` derivation lives in
+`nyc_cab_events.contracts.events`, not in the producer module. It takes a
+`Mapping[str, Any]` keyed by Silver field names and returns a SHA-256 hex
+digest truncated to 16 characters.
+
+#### Rationale
+
+Determinism is a wire-format property, not a producer implementation
+detail. Two consequences:
+
+1. **Contract guardrail honored.** The function is pure: no Spark, no I/O,
+   no Kafka. It fits the same architectural guardrail that protects
+   `nyc_cab.contracts`. Tests run without Spark.
+2. **Sharing point.** If a Bronze or experiment-layer module ever needs to
+   know the canonical `event_id` for a Silver row (e.g., for back-joining
+   against event aggregates), it imports from `contracts.events` rather
+   than reaching into the producer.
+
+The hash specification is part of the decision, not an implementation
+detail:
+
+- **Algorithm: SHA-256.** Cryptographically strong is overkill for the
+  pure collision-avoidance use case, but SHA-256 is universally available,
+  fast enough at NYC volumes, and produces uniformly distributed bits for
+  truncation.
+- **Truncation: 16 hex characters (64 bits).** Effective collision
+  resistance ≈ 2³² by the birthday bound, ~4 billion items before a 50%
+  collision probability. NYC monthly cardinality is ~3M, three orders of
+  magnitude away from the danger zone.
+- **Input fields: ordered tuple** `(cab_type, year, month, VendorID,
+  tpep_pickup_datetime, tpep_dropoff_datetime, PULocationID, DOLocationID,
+  fare_amount, total_amount)`. Captures enough of the source-row identity
+  that collisions require multiple identical trips, which TLC data does
+  not produce in normal volume.
+- **Joining: `:`-separated string, then UTF-8 bytes.** ISO-formatted
+  datetimes contain colons themselves; the joiner functions as a known
+  positional marker between fields, not a tokenizer, so embedded colons
+  inside individual field strings do not create ambiguity.
+- **Datetime formatting: `datetime.isoformat()`.** Canonical, lossless,
+  round-trip safe, matches the JSON wire format.
+
+#### Deviation from approved default
+
+The original proposal said the function would "log unexpected keys at
+INFO and ignore them." On implementation, the function silently ignores
+extras instead. Logging in a hot-path function called once per Silver row
+would emit noise proportional to row count, and a pure contract-level
+function should not have side effects. The behavior is documented in the
+function's docstring; the safety net is the test that verifies extras do
+not change the hash.
+
+### 37. Wire-Format Schema Version Uses Strict Equality
+
+The `schema_version` field on `TripCompleted` is a string-valued envelope
+field. Its only currently-valid value is `"1"`. Both construction and JSON
+deserialization enforce strict equality against the
+`SCHEMA_VERSION` module constant — no semver semantics, no forward-
+compatible minor versions, no implicit upgrade path.
+
+#### Rationale
+
+Schema versioning is binary at the producer/consumer interface: you can
+either deserialize this format or you can't. Forward-compatible minor
+versions introduce ambiguity that hurts more than it helps in two ways:
+
+1. **Field optionality drift.** "Backwards-compatible additive minor
+   version" really means "fields are optional in some versions and
+   required in others," which the strict `_Validated` contract refuses to
+   express anyway. Either a field is required or it isn't; semver semantics
+   on the schema don't change that.
+2. **Topic-level versioning is the existing convention.** The topic name
+   already carries the major version (`trip.completed.v1`). A future
+   `v2` payload lives on `trip.completed.v2` with a new
+   `SCHEMA_VERSION = "2"`, and the producer-consumer pair for v2 is
+   distinct from v1. Producers and consumers are paired per major version;
+   that's where evolution happens.
+
+Alternatives considered:
+
+- **`"1.0.0"` (semver).** Rejected as misleading: nothing in the contract
+  treats `"1.0.0"` and `"1.0.1"` as compatible.
+- **Integer version field.** Rejected for symmetry with the topic name's
+  `v1` string.
+- **No field; trust the topic.** Rejected because a payload separated
+  from its topic (replayed from a file, mirrored to a parallel topic) has
+  no version cue without an in-payload field.
+
+### 38. JSON Deserialization Is Strict on the Field Set
+
+The `from_json` deserializer rejects payloads that have either missing or
+unexpected fields. The valid field set is exactly the ten fields on
+`TripCompleted`; anything else raises `InvalidEventPayloadError`.
+
+#### Rationale
+
+Permissive deserialization hides wire-format drift. If a producer adds a
+field without a major version bump, strict deserialization fails loudly
+on the consumer side; the alternative (silently dropping unknown fields)
+would let the drift propagate undetected through the entire system.
+
+Three further consequences flow from strict mode:
+
+1. **The producer is the source of truth.** The producer emits exactly
+   the field set the contract specifies. If a new field is needed, it
+   becomes a new major version, and that triggers `SCHEMA_VERSION` and
+   topic changes (decisions 35/37).
+2. **Quarantine semantics are clean.** A consumer that catches
+   `InvalidEventPayloadError` and routes the payload to a quarantine sink
+   gets every drift case, not just the "obviously broken" ones.
+3. **Replay safety.** Replayed payloads from old topics or files cannot
+   silently produce events with stale or extra fields; the consumer
+   rejects them at the wire-format boundary.
 
 ## Architectural Guardrails
 

@@ -11,13 +11,17 @@ This module currently provides:
 - :class:`TripCompletedProducerResult` — fully implemented validated result,
   including the reconciliation invariant
   ``silver_read_count == events_emitted + events_quarantined``
-- :func:`derive_event_id` — stub
 - :func:`produce_trip_completed_events` — stub
 
-The stubs are guarded by :class:`NotImplementedError` and corresponding
-``pytest.raises`` tests (design log decision 25). The heavy imports
-(:mod:`pyspark`, :mod:`confluent_kafka`) live inside the stubs and will move
-to module level when the stubs are filled in.
+The stub is guarded by :class:`NotImplementedError` and a corresponding
+``pytest.raises`` test (design log decision 25). The heavy imports
+(:mod:`pyspark`, :mod:`confluent_kafka`) live inside the stub and will move
+to module level when it is filled in.
+
+Deterministic ``event_id`` derivation lives in
+:func:`nyc_cab_events.contracts.events.derive_event_id` — a contract-level
+pure function over a Silver-row dict (design log decision 36). The
+producer calls it once per row inside its Spark loop.
 """
 
 from __future__ import annotations
@@ -124,27 +128,7 @@ class TripCompletedProducerResult(_Validated):
         )
 
 
-# --- Stubs ------------------------------------------------------------------
-
-
-def derive_event_id(row: Any) -> str:
-    """Derive a deterministic ``event_id`` for one Silver accepted row.
-
-    The id is a SHA-256 hex digest truncated to 16 hex characters (64 bits)
-    over the tuple
-    ``(cab_type, year, month, VendorID, tpep_pickup_datetime,
-    tpep_dropoff_datetime, PULocationID, DOLocationID, fare_amount,
-    total_amount)``. The truncation length is comfortably above NYC monthly
-    cardinality (~3 million rows; 64-bit space has effective collision
-    resistance around 2**32 ≈ 4 billion by the birthday bound).
-
-    Determinism is the load-bearing property: rerunning the producer on the
-    same Silver partition must emit identical ``event_id`` values so that
-    Kafka key equality lets downstream consumers detect duplicates.
-    """
-    raise NotImplementedError(
-        "derive_event_id is a scaffolding stub; see module docstring and design log decision 25."
-    )
+# --- Stub -------------------------------------------------------------------
 
 
 def produce_trip_completed_events(
@@ -158,8 +142,12 @@ def produce_trip_completed_events(
 
         1. Read ``silver_partition_path`` with Spark.
         2. Count rows to anchor the reconciliation invariant.
-        3. For each row: derive ``event_id``, build a ``TripCompleted`` via
-           :meth:`~nyc_cab_events.contracts.events.TripCompleted.create_validated`.
+        3. For each row: call
+           :func:`~nyc_cab_events.contracts.events.derive_event_id` with the
+           row dict, build a ``TripCompleted`` via
+           :meth:`~nyc_cab_events.contracts.events.TripCompleted.create_validated`,
+           serialize via :func:`~nyc_cab_events.contracts.events.to_json`,
+           and key via :func:`~nyc_cab_events.contracts.events.event_key`.
         4. On success, produce to ``producer_config.topic``.
         5. On :class:`~nyc_cab.exceptions.InvalidRequestError`, route to
            :func:`~nyc_cab_events.contracts.events.quarantine_topic_for`.
