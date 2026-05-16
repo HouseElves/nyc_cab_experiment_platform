@@ -59,7 +59,7 @@ local `test/` directory, where `test/module.py` contains tests for
 These local `test/` directories are authoritative for module-level coverage.
 The minimum standard for push to GitHub is **90% branch coverage** for
 module-level tests. The platform currently meets this standard at 100% branch
-coverage across 595 tests on listed modules.
+coverage on listed modules.
 
 Root-level `test/` suites cover integration and functional concerns.
 Bronze and Silver integration testing is each split into two tiers:
@@ -240,11 +240,11 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   at result construction time
 - Integration tests in two tiers per layer: Tier 1 (CI-safe, synthetic
   fixtures, zero mocks), Tier 2 (`@pytest.mark.live`, real source data)
-- All 619 tests annotated with `unit`, `spark`, `live`, `kafka`, or
+- All tests annotated with `unit`, `spark`, `live`, `kafka`, or
   `postgres` pytest marks; mixed-responsibility files carry per-function marks
 - GitHub Actions CI live: three independent jobs (lint, test, import smoke);
   pylint 10/10 gate, 90% branch coverage gate, clean-install import gate
-- 619 tests, 100% branch coverage on listed modules
+- 100% branch coverage on listed modules
 - `nyc_cab_events` package scaffolded parallel to `nyc_cab` in the same wheel:
   four subpackages (`contracts`, `producer`, `consumer`, `sink`) implementing
   the batch-event bridge described in design log decision 31
@@ -256,13 +256,19 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   partition routing, strict JSON serialize/deserialize with schema-version
   enforcement, and a dedicated `InvalidEventPayloadError` for wire-format
   failures
-- Producer, consumer, and sink modules ship validated config and result
-  dataclasses; the producer's reconciliation invariant
-  (`silver_read_count == events_emitted + events_quarantined`) and the sink's
-  derivation-consistency check on `ReconciliationResult` are both enforced
-  structurally at construction time
-- Heavy operations (`produce_trip_completed_events`, `consume_and_aggregate`,
-  `ensure_table`, `upsert_hourly_counts`, `reconcile_against_silver`) are
+- `produce_trip_completed_events` complete: streams Silver accepted rows
+  via `DataFrame.toLocalIterator`, builds events via the pure
+  `_route_silver_row` per-row function, emits to Kafka through a
+  factory-injected `confluent_kafka.Producer`, routes contract-violating
+  rows to the quarantine topic with rejection metadata in Kafka headers,
+  and returns a `TripCompletedProducerResult` whose reconciliation
+  invariant (`silver_read_count == events_emitted + events_quarantined`)
+  proves no rows were lost
+- Consumer and sink modules ship validated config and result dataclasses;
+  the sink's derivation-consistency check on `ReconciliationResult` is
+  enforced structurally
+- Remaining heavy operations (`consume_and_aggregate`, `ensure_table`,
+  `upsert_hourly_counts`, `reconcile_against_silver`) are
   `NotImplementedError` stubs, each covered by a matching `pytest.raises`
   test per design log decision 25
 - `docker-compose.yml` brings up Kafka 7.6 + Zookeeper + Postgres 16 with
@@ -273,22 +279,29 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   `requirements-events.lock.txt` pins the four-package transitive closure
 - New pytest markers `kafka` and `postgres` registered as orthogonal markers;
   testpaths expanded for the four events subpackages
-- All events-package tests currently `unit`-marked; pylint 10/10 on the
-  new package and 100% branch coverage on the events subpackage
-- Design log decisions 32–38 record the Kafka client choice, the
+- events-package tests carry `unit`, `spark`, `kafka`, and `postgres`
+  marks as appropriate; pylint 10/10 on the new package and 100% branch
+  coverage on the events subpackage
+- Design log decisions 32–41 record the Kafka client choice, the
   event-time bucketing rule, the Postgres-as-sink decision, the hour-grain
   `event_key`, contract-level `derive_event_id`, strict schema-version
-  equality, and strict JSON deserialization
+  equality, strict JSON deserialization, the `toLocalIterator` driver
+  pattern, the headers-based quarantine metadata, and the slice-grain
+  quarantine key
 
-**Next milestone:** deterministic `produce_trip_completed_events`
-implementation, working solely off the Silver layer. Spark reads the
-accepted-partition Parquet, the per-row loop calls
-`derive_event_id` / `TripCompleted.create_validated` / `to_json` /
-`event_key`, the `confluent_kafka.Producer` ships to `trip.completed.v1`
-with quarantine routing on `InvalidRequestError`, and the run returns a
-`TripCompletedProducerResult` whose reconciliation invariant proves the
-loop did not lose rows. Sets up the subsequent milestone: the
-`consume_and_aggregate` consumer plus the Postgres sink implementation.
+**Next milestone:** consume events idempotently into Postgres. Fill
+`ensure_table` (apply `TRIP_COMPLETED_HOURLY_DDL` via psycopg3),
+`consume_and_aggregate` (confluent_kafka poll loop, in-memory aggregator
+keyed on `(cab_type, year, month, hour)`, sink call, offset commit), and
+`upsert_hourly_counts` (`INSERT ... ON CONFLICT (cab_type, year, month,
+hour) DO UPDATE` for bounded-replay convergence). Cross-replay
+idempotency — where the producer has rerun and a fresh consumer group
+sees duplicate events — requires per-event deduplication on the
+deterministic `event_id`; the specific mechanism (in-memory seen-set,
+persistent dedup table, or bounded-window replacement) is part of
+this milestone's design. Sets up the final milestone:
+`reconcile_against_silver` queries the sink and compares the monthly
+sum against Silver's `accepted_count`.
 
 ## Roadmap
 

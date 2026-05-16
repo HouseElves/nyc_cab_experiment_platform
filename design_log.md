@@ -816,7 +816,7 @@ Two pressures point at Postgres rather than continuing the Parquet pattern:
    emits the same deterministic events twice, and a fresh consumer
    group reads all copies and aggregates them together, the in-memory
    aggregator counts each event twice and the upsert faithfully writes
-   the doubled count.  Postgres upsert is doing exactly what it's told;
+   the doubled count. Postgres upsert is doing exactly what it's told;
    the consumer is the layer that hasn't deduplicated.
 
    Cross-replay idempotency requires the consumer to dedupe on the
@@ -838,7 +838,7 @@ Alternatives considered:
   container.
 - **DuckDB.** A real candidate for read-side analytics, but for the
   write-and-upsert role Postgres is the cleaner choice.
-  
+
 ### 35. Trip-Completed `event_key` Has Hour Grain
 
 The Kafka partition routing key for `TripCompleted` events is
@@ -863,12 +863,12 @@ Three pressures converge on hour grain:
    is comfortable headroom against any reasonable broker partition count
    without proliferating keys to the point where partition affinity stops
    meaning anything.
-3. **Replay isolation.** Hour-grain keys keep all records for an aggregate
-   bucket partition-local and make hour-specific replay/filtering straightforward,
-   but Kafka replay still occurs at partition/log granularity.
-   With month-grain keying, replay of one hour pulls the whole month-key
-   partition through the consumer; with hour-grain keying, the surface is
-   exactly the hour being replayed.
+3. **Replay isolation.** Hour-grain keys keep all records for an
+   aggregate bucket partition-local and make hour-specific replay or
+   filtering straightforward, but Kafka replay still occurs at
+   partition/log granularity. With month-grain keying, replay of one
+   hour pulls the whole month-key partition through the consumer; with
+   hour-grain keying, the surface is exactly the hour being replayed.
 
 Alternatives considered:
 
@@ -996,6 +996,196 @@ Three further consequences flow from strict mode:
 3. **Replay safety.** Replayed payloads from old topics or files cannot
    silently produce events with stale or extra fields; the consumer
    rejects them at the wire-format boundary.
+
+### 39. Producer Streams Rows via `toLocalIterator`
+
+The producer driver reads the Silver accepted Parquet partition with
+Spark and iterates rows on the driver via `DataFrame.toLocalIterator()`.
+A single `confluent_kafka.Producer` instance lives on the driver and
+ships events synchronously row-by-row (with light batching via librdkafka
+under the hood).
+
+#### Rationale
+
+The alternative pattern is `foreachPartition` with one producer per
+executor. That's the textbook horizontally-scaled answer, and it's the
+right answer when per-event work is heavy or when total throughput
+demands cross-executor parallelism. For this platform, neither pressure
+is present:
+
+1. **Per-row work is small.** Per row: one hash (SHA-256 over ~120
+   bytes), one frozen dataclass construction, one JSON serialization, one
+   `Producer.produce` call. None of these are CPU-bound at NYC monthly
+   volumes (~3M rows). A single-threaded driver loop sustains the rate
+   trivially.
+2. **Memory is bounded.** `toLocalIterator` streams rows one at a time
+   from executors to the driver; it does not collect the full partition
+   into driver memory. The driver's resident set is bounded by the
+   single-row buffer plus librdkafka's internal queue, not by the
+   partition size.
+3. **Operational simplicity.** One producer instance means one set of
+   delivery callbacks, one place to track delivery failures, one flush
+   point. `foreachPartition` requires producer instantiation inside the
+   executor closure and complicates failure aggregation.
+
+The decision is reversible. When the per-event work grows (e.g., adding a
+synchronous Schema Registry lookup) or when the throughput target
+outgrows single-driver capacity, the refactor to `foreachPartition` is
+local to `produce_trip_completed_events` and does not touch the
+contract, the routing function, or the result dataclass.
+
+### 40. Quarantine Routing Carries Reason Metadata in Kafka Headers
+
+When a Silver row fails event-contract validation, the producer emits to
+the quarantine topic with the raw source row in the message body (as
+JSON) and the rejection metadata in Kafka message headers. Headers
+carry: `rejection_reason` (the `EventRejectionReason` enum value),
+`quarantined_at` (ISO 8601 wall-clock UTC), and `violations` (a string
+rendering of the structural-check failures or the missing-field
+`KeyError` message).
+
+#### Rationale
+
+The quarantine topic is a diagnostic surface, not a primary product.
+Three design pressures converge:
+
+1. **Body stays simple.** Quarantine bodies are dumps of the source
+   row. No envelope, no schema, no version. Operators investigating a
+   quarantined record see exactly what the producer was handed. The
+   `json.dumps(..., default=str)` serialization handles datetimes and any
+   non-JSON-native source fields without ceremony.
+2. **Metadata stays machine-readable.** Putting the reason in headers
+   means a downstream consumer can filter or fan out without parsing the
+   body. `kafkacat -e -f '%h\n%s\n' -t trip.completed.v1.invalid` produces
+   a human-readable report.
+3. **Parallel-format primary topic.** The primary topic's body is also
+   JSON; both topics are inspectable with the same tools. The header on
+   the primary topic carries `schema_version`; the header on quarantine
+   carries the rejection metadata.
+
+Alternatives considered:
+
+- **Wrapped envelope** (`{"source_row": {...}, "reason": "...", ...}`).
+  Rejected because it defines a second wire schema for a diagnostic
+  surface that doesn't merit one.
+- **Reason in the body next to the source row.** Rejected for the same
+  reason: any structure in the quarantine body becomes another contract
+  surface to evolve.
+- **Reason in the Kafka key.** Rejected because the key carries
+  partition-routing semantics; quarantine messages currently key on
+  monthly slice (`cab_type/YYYY/MM`) for partition-local replay.
+
+### 41. Producer-Side Quarantine Key Uses Monthly Grain
+
+The Kafka key for quarantine messages is `cab_type/YYYY/MM`, not the
+hour-grain key used for primary-topic events.
+
+#### Rationale
+
+The hour is event-time data extracted from the source row; for a row
+that failed event construction (e.g., missing `tpep_pickup_datetime`),
+the hour may not be derivable. Routing all quarantine for a slice to one
+key keeps partition placement deterministic without depending on
+potentially-malformed fields. Slice grain also matches the natural
+operational query against quarantine: "show me everything that bounced
+during yellow-2023-01."
+
+This is a producer-side choice and does not constrain consumer-side
+quarantine handling, which is a future decision tied to the consumer
+implementation.
+
+### 42. Bounded Full-Slice Replay (v1)
+
+The v1 consumer implements bounded full-slice replay, not incremental
+resume. Each invocation processes one `(cab_type, year, month)` slice by
+reading the configured bounded replay input, filtering to the requested
+slice, deduplicating in memory on deterministic `event_id`, and writing
+complete hourly aggregate rows through overwrite-style Postgres upserts.
+
+The contract is: read the complete slice or write nothing. A failed run
+is discarded and retried from the beginning of the bounded replay
+window.
+
+#### Rationale
+
+This is not deferred infrastructure or technical debt; it is aggressively
+applied YAGNI. The consumer is sized for one job: produce a correct
+hourly aggregate per monthly slice, given that Silver is the source of
+truth (decision 31) and the producer is deterministic (decision 36).
+The smallest mechanism that achieves that job has four parts:
+
+1. **Overwrite-on-conflict semantics.** Aggregate rows are written
+   through
+
+   ```sql
+   ON CONFLICT (cab_type, year, month, hour) DO UPDATE SET event_count = EXCLUDED.event_count
+   ```
+
+   The consumer hands the sink the complete count for a slice; existing
+   rows for that slice are overwritten. This refines the "bounded-replay
+   convergence" claim in decision 34 from an abstract property into a
+   concrete contract.
+
+2. **In-memory seen-set keyed on `event_id`.** Decision 36's
+   determinism is the lever: producer reruns emit byte-identical events
+   with identical ids, and the seen-set collapses duplicate events
+   through constant-time membership checks. Memory is bounded by the
+   cardinality of one slice — NYC yellow-cab volumes are ~3M rows/month,
+   giving a seen-set of roughly 250–300MB at 16-character ids plus
+   Python set overhead, comfortable on a single-driver rig.
+
+3. **Slice-bounded consumer.** Each invocation takes `(cab_type, year,
+   month)` as the run identity. The consumer reads the configured
+   replay window, filters to the requested slice in application code,
+   accumulates hourly counts, and upserts the completed aggregate rows.
+   Re-runs reread the bounded replay window from its beginning.
+
+4. **No resume-from-committed-offset.** Overwrite-style upsert plus
+   partial reads is a broken composition: a partial count overwrites a
+   correct one. The contract is "read the complete slice or read
+   nothing." Crashes are recoverable by re-running the slice; nothing
+   is recoverable by resuming mid-slice.
+
+Alternatives considered:
+
+- **Persistent `processed_event_ids` table + INCREMENT upsert.** The
+  only mechanism that supports incremental processing safely. Rejected
+  for v1 because the platform's orchestration milestone is monthly
+  batch replay/backfill (see Architecture table), not streaming — there
+  is no incremental requirement to satisfy. The persistent dedup table
+  is the right promotion target when a real pressure appears (see
+  triggers below).
+- **In-memory seen-set + INCREMENT upsert.** Rejected: the in-memory
+  state does not survive cross-run, so the delta gets re-counted on
+  every replay.
+- **Overwrite-style upsert + resume-from-committed-offset.** Rejected
+  as fundamentally unsound, per part 4 above.
+
+#### Triggers for promotion
+
+Promotion from in-memory seen-set + overwrite-style upsert to the
+persistent dedup table + INCREMENT mechanism is appropriate when one of
+these conditions fires:
+
+- **Per-slice cardinality outgrows driver memory.** Roughly 10x the
+  current NYC scale approaches the edge of comfortable single-driver
+  capacity. The promotion lifts the dedup-state bound from driver memory
+  to Postgres storage.
+- **Multi-slice consumer invocations.** If a single consumer run
+  processes events spanning multiple slices (a fanned-out or
+  continuously-running consumer), the slice-bounded contract no longer
+  constrains the seen-set, and the in-memory mechanism loses its
+  natural bound. Same promotion target.
+- **Consumer-side offset-bounded replay.** Consumer-side offset-bounded
+  replay would require the producer to report emitted offset bounds,
+  currently not captured in `TripCompletedProducerResult`. The
+  producer-side addition is small (a `(start_offset, end_offset)` tuple
+  per Kafka partition on the result dataclass); the consumer-side work
+  is the larger lift.
+- **Streaming consumer requirement.** If the platform moves to a
+  continuous consumer with no batch boundary, bounded full-slice replay
+  is no longer the right model. Persistent dedup + INCREMENT becomes
+  the natural target.
 
 ## Architectural Guardrails
 

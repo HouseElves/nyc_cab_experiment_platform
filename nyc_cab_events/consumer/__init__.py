@@ -8,16 +8,26 @@ The consumer reads ``trip.completed.v1`` from Kafka, aggregates events by
 ``tpep_pickup_datetime``, not processing time (design log decision 33) —
 and writes upserts into the Postgres ``trip_completed_hourly`` table.
 
-The consumer is idempotent. Two equally valid runs:
+The consumer is convergent within a single replay window: re-running the
+batch consumer against the same Kafka topic state produces the same
+final aggregate. Two equally valid runs:
 
-- Cold start: read from offset 0, fully aggregate, write upserts. Postgres
-  upserts on the primary key ``(cab_type, year, month, hour)`` so writing
-  the same aggregate twice converges to the same row state.
-- Resume: read from the committed offset; the upsert semantics still hold.
+- Cold start: read from offset 0, aggregate, write upserts. The upsert
+  on the primary key ``(cab_type, year, month, hour)`` overwrites the
+  row's count with the new full count.
+- Resume: read from the committed offset; the partial new events get
+  aggregated and merged with the existing row count via the same
+  upsert.
 
-Idempotency comes from the sink's ``ON CONFLICT DO UPDATE`` clause, not from
-in-consumer deduplication. The consumer does not need to remember which
-events it has seen.
+End-to-end exactly-once is **not** automatic from the upsert alone. If
+the producer reruns and emits duplicate events (deterministic
+``event_id`` means the same event is reproduced byte-identical), a
+fresh consumer group reading the topic from offset 0 will count each
+duplicate, and the upsert will faithfully write the doubled count. The
+consumer implementation is responsible for per-event deduplication
+keyed on ``event_id`` when cross-replay safety matters; the mechanism
+(in-memory seen-set, persistent dedup table, or bounded-window
+replacement) is documented in design log decision 34.
 
 This module exists at scaffolding stage; the heavy bits —
 ``confluent_kafka.Consumer`` polling loop, deserialization, the in-memory

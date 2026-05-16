@@ -1,4 +1,7 @@
-# pylint: disable=redefined-outer-name
+# pylint: disable=redefined-outer-name,duplicate-code
+# duplicate-code: the silver_row fixture is intentionally repeated across
+# the events test files (decision 28: tolerate duplication until shared
+# vocabulary is justified).
 """
 End-to-end integration test for the trip-completed event bridge.
 
@@ -31,10 +34,7 @@ from nyc_cab_events.consumer.trip_completed import (
     TripCompletedConsumerConfig,
     consume_and_aggregate,
 )
-from nyc_cab_events.producer.trip_completed import (
-    TripCompletedProducerConfig,
-    produce_trip_completed_events,
-)
+from nyc_cab_events.producer.trip_completed import TripCompletedProducerConfig
 from nyc_cab_events.sink.postgres import (
     PostgresSinkConfig,
     ensure_table,
@@ -90,16 +90,54 @@ def test_ensure_table_step_is_not_implemented(sink_config: PostgresSinkConfig) -
         ensure_table(sink_config)
 
 
-def test_producer_step_is_not_implemented(producer_config: TripCompletedProducerConfig, tmp_path) -> None:
-    """The producer step of the integration loop is a stub."""
-    silver_partition_path = tmp_path / "cab_type=yellow" / "year=2023" / "month=1"
-    silver_partition_path.mkdir(parents=True)
-    with pytest.raises(NotImplementedError):
-        produce_trip_completed_events(
-            spark=None,
-            silver_partition_path=silver_partition_path,
-            producer_config=producer_config,
+def test_producer_step_emits_events_to_kafka(
+    producer_config: TripCompletedProducerConfig, tmp_path,
+) -> None:
+    """The producer step writes events to a live Kafka broker.
+
+    Requires docker-compose up. Builds a synthetic Silver partition with
+    two clean rows and one bad row, runs the producer, and confirms the
+    returned result satisfies the reconciliation invariant.
+    """
+    # pylint: disable=import-outside-toplevel
+    from datetime import datetime as _dt
+    from pyspark.sql import SparkSession
+    from nyc_cab_events.producer.trip_completed import produce_trip_completed_events
+
+    spark = (
+        SparkSession.builder
+        .appName("nyc_cab_events_integration_producer")
+        .master("local[1]")
+        .config("spark.sql.shuffle.partitions", "1")
+        .config("spark.ui.enabled", "false")
+        .getOrCreate()
+    )
+    try:
+        clean_row = {
+            "VendorID": 1,
+            "tpep_pickup_datetime": _dt(2023, 1, 15, 14, 30, 0),
+            "tpep_dropoff_datetime": _dt(2023, 1, 15, 14, 55, 0),
+            "PULocationID": 161,
+            "DOLocationID": 236,
+            "passenger_count": 2,
+            "trip_distance": 3.5,
+            "fare_amount": 18.0,
+            "total_amount": 22.0,
+        }
+        bad_row = {**clean_row, "fare_amount": -1.0}
+        partition_path = tmp_path / "silver"
+        partition_path.mkdir(parents=True, exist_ok=True)
+        spark.createDataFrame([clean_row, clean_row, bad_row]).write.mode("overwrite").parquet(str(partition_path))
+
+        result = produce_trip_completed_events(
+            spark, partition_path, producer_config, "yellow", 2023, 1,
         )
+        assert result.silver_read_count == 3
+        assert result.events_emitted == 2
+        assert result.events_quarantined == 1
+        assert result.silver_read_count == result.events_emitted + result.events_quarantined
+    finally:
+        spark.stop()
 
 
 def test_consumer_step_is_not_implemented(
