@@ -2,8 +2,10 @@
 branch = True
 source =
     nyc_cab
+    nyc_cab_events
 omit =
     */nyc_cab/test/*
+    */nyc_cab_events/*/test/*
     */test/*
     */nyc_cab/__main__.py
 
@@ -14,5 +16,6 @@ precision = 2
 fail_under = 90
 omit =
     */nyc_cab/test/*
+    */nyc_cab_events/*/test/*
     */test/*
     */nyc_cab/__main__.py

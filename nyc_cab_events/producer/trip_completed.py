@@ -39,9 +39,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Mapping
+from typing import Any, ClassVar, Final, Mapping
 
-from confluent_kafka import KafkaException, Producer
+from confluent_kafka import KafkaError, KafkaException, Producer
+from confluent_kafka.admin import AdminClient, NewTopic
 from pyspark.sql import SparkSession
 
 from nyc_cab._validation import _Validated, CheckSpec, CheckTuple
@@ -54,7 +55,6 @@ from nyc_cab_events.contracts.events import (
     TripCompleted,
     derive_event_id,
     event_key,
-    quarantine_topic_for,
     to_json,
 )
 
@@ -299,7 +299,7 @@ def _route_silver_row(
     except (KeyError, InvalidRequestError) as exc:
         violations_text = str(exc) if isinstance(exc, KeyError) else str(exc.violations)
         return _RoutedMessage(
-            topic=quarantine_topic_for(EventRejectionReason.INVALID_CONSTRUCTION),
+            topic=producer_config.quarantine_topic,
             key=f"{cab_type}/{year:04d}/{month:02d}",
             value=_serialize_quarantine_row(row, cab_type, year, month),
             headers=_quarantine_headers(EventRejectionReason.INVALID_CONSTRUCTION, violations_text),
@@ -336,6 +336,83 @@ def _make_kafka_producer(config: TripCompletedProducerConfig) -> Producer:
         "enable.idempotence": True,
         "linger.ms": 10,
     })
+
+
+# --- Kafka admin: topic creation -------------------------------------------
+
+
+_TOPIC_NUM_PARTITIONS: Final[int] = 3
+"""Default partition count for the trip-completed topics.
+
+Sized for the development docker-compose broker and NYC-scale monthly
+volumes. Production deployments would tune this against broker count and
+expected throughput; the value is small enough that hour-grain keys
+(decision 35) still distribute well across the partitions."""
+
+
+_TOPIC_REPLICATION_FACTOR: Final[int] = 1
+"""Replication factor for the trip-completed topics. ``1`` matches the
+single-broker docker-compose dev setup. Production would raise this."""
+
+
+def _make_admin_client(config: TripCompletedProducerConfig) -> AdminClient:
+    """Build a configured ``confluent_kafka.admin.AdminClient``.
+
+    Module-level so tests can monkeypatch it to return a recording fake,
+    mirroring the :func:`_make_kafka_producer` pattern.
+    """
+    return AdminClient({"bootstrap.servers": config.bootstrap_servers})
+
+
+def ensure_topics(producer_config: TripCompletedProducerConfig) -> None:
+    """Ensure the primary and quarantine topics exist on the broker.
+
+    Idempotent: creates each topic if absent; treats
+    ``TopicAlreadyExistsError`` as success. Mirrors the
+    :func:`~nyc_cab_events.sink.postgres.ensure_table` pattern on the
+    sink side. Intended to run once per producer startup before the
+    first :func:`produce_trip_completed_events` call.
+
+    The docker-compose Kafka broker has auto-topic-creation disabled
+    (intentionally — production brokers typically do too); this function
+    is the explicit replacement for that default. Topic identity comes
+    from ``producer_config.topic`` and ``producer_config.quarantine_topic``
+    so test harnesses can point at scratch topics.
+    """
+    admin = _make_admin_client(producer_config)
+    new_topics = [
+        NewTopic(
+            producer_config.topic,
+            num_partitions=_TOPIC_NUM_PARTITIONS,
+            replication_factor=_TOPIC_REPLICATION_FACTOR,
+        ),
+        NewTopic(
+            producer_config.quarantine_topic,
+            num_partitions=_TOPIC_NUM_PARTITIONS,
+            replication_factor=_TOPIC_REPLICATION_FACTOR,
+        ),
+    ]
+    futures = admin.create_topics(new_topics)
+    for topic_name, fut in futures.items():
+        try:
+            fut.result()
+            _LOGGER.info("ensure_topics: created %s", topic_name)
+        except KafkaException as exc:
+            # confluent_kafka raises KafkaException(KafkaError(...)) when
+            # create_topics fails. The first positional arg is the
+            # KafkaError instance; its .code() exposes the broker's error
+            # code as a stable integer constant. Inspecting the code is
+            # robust against error-message wording changes across
+            # librdkafka versions or locale shifts; the previous
+            # string-match approach was brittle by comparison.
+            kafka_error = exc.args[0] if exc.args else None
+            if (
+                isinstance(kafka_error, KafkaError)
+                and kafka_error.code() == KafkaError.TOPIC_ALREADY_EXISTS
+            ):
+                _LOGGER.info("ensure_topics: %s already exists", topic_name)
+                continue
+            raise
 
 
 # --- Driver -----------------------------------------------------------------

@@ -1140,6 +1140,16 @@ The smallest mechanism that achieves that job has four parts:
    accumulates hourly counts, and upserts the completed aggregate rows.
    Re-runs reread the bounded replay window from its beginning.
 
+   The replay window is captured deterministically at start of run by
+   querying Kafka for end-of-partition offsets
+   (`get_watermark_offsets`) across the topic's partitions; the
+   consumer reads forward until each partition reaches its captured
+   offset, then stops. Events arriving mid-run fall into the next
+   replay. This is determinism-driven per project policy: idle-timeout
+   polling was considered and rejected because a slow broker could
+   produce different inputs from the same topic state across runs,
+   making test outcomes and reconciliation results non-reproducible.
+
 4. **No resume-from-committed-offset.** Overwrite-style upsert plus
    partial reads is a broken composition: a partial count overwrites a
    correct one. The contract is "read the complete slice or read
@@ -1186,6 +1196,68 @@ these conditions fires:
   continuous consumer with no batch boundary, bounded full-slice replay
   is no longer the right model. Persistent dedup + INCREMENT becomes
   the natural target.
+
+### 43. Sink Connection Uses psycopg Keyword Arguments
+
+The Postgres sink's connection primitive (:func:`_connect` in
+``nyc_cab_events.sink.postgres``) opens connections by passing host,
+port, dbname, user, and password as separate keyword arguments to
+``psycopg.connect``. :meth:`PostgresSinkConfig.to_dsn` is retained for
+display, logging, and diagnostic purposes only and is explicitly *not*
+the connection primitive.
+
+#### Rationale
+
+String-built libpq DSNs are fragile against passwords, users, or
+database names that contain spaces or libpq-significant characters
+(``=``, ``'``, ``\``). The fragility has two shapes:
+
+1. **Correctness.** A password containing a space — common in
+   organizationally-generated credentials — breaks DSN parsing
+   entirely. A password containing ``'`` or ``\`` may parse to
+   something non-obvious and either fail or, worse, succeed against
+   an unintended target.
+2. **Security.** A string-built DSN concatenates uncontrolled input
+   (the password) into a structured connection string. The natural
+   class of vulnerability is connection-string injection: a password
+   containing ``host=evil.example.com`` could in principle redirect
+   the connection if the surrounding string-building is naive. The
+   threat model here is narrow — the password originates from a
+   controlled environment per decision 4's no-dotenv discipline — but
+   the keyword form eliminates the class of bug entirely. psycopg's
+   keyword-argument path delegates all quoting and escaping to the
+   library.
+
+The connection-primitive contract — keyword arguments are how
+connections are opened, ``to_dsn`` is for display — is enforced by
+``_connect`` itself and noted in the ``to_dsn`` docstring. ``to_dsn``
+unconditionally redacts the password to ``***`` in its return value so
+the string is safe to log; the only callers that need the live
+password are those building a real connection, and they go through
+``_connect``. Test fixtures that need a real connection (``clean_table``
+in the sink test module, ``empty_aggregate_table`` in the integration
+test) use ``_connect`` directly rather than constructing their own
+connections, so there is exactly one connection primitive in the
+codebase.
+
+Alternatives considered:
+
+- **String-built libpq DSN passed to ``psycopg.connect``.** Rejected,
+  per the rationale above. This was the scaffolding implementation; the
+  decision-43 refactor replaced it.
+- **psycopg connection URI** (``postgresql://user:pass@host:port/db``).
+  Considered. Rejected because the URI form has the same escaping
+  fragility as the libpq DSN form — the user and password fields are
+  URL-encoded, which requires the caller to do the encoding correctly,
+  which is exactly the responsibility the keyword-argument form
+  delegates to psycopg.
+- **A connection pool managed by the sink config.** Considered briefly.
+  Rejected for the same reason as the per-call connection management
+  documented in decision 34: at the batch-event-bridge cadence (one
+  connection per consumer batch plus one per reconciliation query),
+  pool management is over-engineering. When the consumer becomes
+  long-lived or high-frequency, pool management becomes the right
+  refactor.
 
 ## Architectural Guardrails
 

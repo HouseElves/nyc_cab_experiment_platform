@@ -14,7 +14,9 @@ This module currently provides:
 The stub is guarded by :class:`NotImplementedError` and a corresponding
 ``pytest.raises`` test (design log decision 25). The heavy imports
 (:mod:`confluent_kafka`, :mod:`psycopg`) live inside the stub and will move
-to module level when it is filled in.
+to module level when it is filled in. The shape of the config and result
+dataclasses below already reflects the decision-42 commitment to bounded
+full-slice replay; Phase B fills in the function body against this shape.
 """
 
 from __future__ import annotations
@@ -38,25 +40,23 @@ from nyc_cab_events.contracts.events import TRIP_COMPLETED_TOPIC
 class TripCompletedConsumerConfig(_Validated):
     """Configure one run of the trip-completed event consumer.
 
-    ``max_idle_polls`` and ``poll_timeout_seconds`` together bound how long
-    a batch consumer waits for new messages before declaring the queue
-    drained and proceeding to the sink write. They have no effect on a
-    long-running consumer; they exist to make the batch pattern deterministic
-    in tests and reconciliation runs.
+    ``poll_timeout_seconds`` bounds how long each individual
+    :meth:`Consumer.poll` call blocks waiting for new messages. The
+    consumer's termination condition is the captured high-water-mark
+    offsets per partition (design log decision 42), not an idle-timeout
+    threshold — the prior ``max_idle_polls`` field has been removed.
     """
 
     bootstrap_servers: str
     group_id: str
     topic: str = TRIP_COMPLETED_TOPIC
     poll_timeout_seconds: int = 5
-    max_idle_polls: int = 3
 
     _type_check_specs: ClassVar[tuple[CheckSpec, ...]] = (
         ("bootstrap_servers", str),
         ("group_id", str),
         ("topic", str),
         ("poll_timeout_seconds", int, bool),
-        ("max_idle_polls", int, bool),
     )
 
     def _structural_checks(self) -> tuple[CheckTuple, ...]:
@@ -66,7 +66,6 @@ class TripCompletedConsumerConfig(_Validated):
             (self.group_id.strip() != "", "group_id", self.group_id),
             (self.topic.strip() != "", "topic", self.topic),
             (self.poll_timeout_seconds > 0, "poll_timeout_seconds", self.poll_timeout_seconds),
-            (self.max_idle_polls > 0, "max_idle_polls", self.max_idle_polls),
         )
 
 
@@ -75,29 +74,63 @@ class TripCompletedConsumerConfig(_Validated):
 
 @dataclass(frozen=True)
 class TripCompletedConsumerResult(_Validated):
-    """Describe the result of one consumer run.
+    """Describe the result of one bounded-full-slice-replay consumer run.
 
-    ``hourly_buckets_written`` is at most ``events_consumed`` (collapsing
-    happens by hour) and is at least one when any events are consumed. The
-    invariant ``hourly_buckets_written <= events_consumed`` is enforced
-    structurally.
+    The slice identity (``cab_type``, ``year``, ``month``) is part of the
+    result, mirroring the producer-side ``TripCompletedProducerResult``.
+    The replay-window counters report what was read, what was in-slice
+    after filtering, and what was unique after deduplication on
+    ``event_id``. ``hourly_buckets_written`` is the number of
+    ``(cab_type, year, month, hour)`` aggregate rows handed to the sink.
+
+    Two structural invariants hold:
+
+    - ``events_in_slice <= events_read``: filtering monotonically reduces.
+    - ``events_unique <= events_in_slice``: deduplication monotonically reduces.
+    - ``hourly_buckets_written <= events_unique``: collapse by hour
+      reduces (or stays equal when every event lands in its own hour).
     """
 
-    events_consumed: int
+    cab_type: str
+    year: int
+    month: int
+    events_read: int
+    events_in_slice: int
+    events_unique: int
     hourly_buckets_written: int
 
     _type_check_specs: ClassVar[tuple[CheckSpec, ...]] = (
-        ("events_consumed", int, bool),
+        ("cab_type", str),
+        ("year", int, bool),
+        ("month", int, bool),
+        ("events_read", int, bool),
+        ("events_in_slice", int, bool),
+        ("events_unique", int, bool),
         ("hourly_buckets_written", int, bool),
     )
 
     def _structural_checks(self) -> tuple[CheckTuple, ...]:
         """Return structural validation rules for the consumer result."""
         return (
-            (self.events_consumed >= 0, "events_consumed", self.events_consumed),
+            (self.cab_type.strip() != "", "cab_type", self.cab_type),
+            (1900 <= self.year <= 2100, "year", self.year),
+            (1 <= self.month <= 12, "month", self.month),
+            (self.events_read >= 0, "events_read", self.events_read),
+            (self.events_in_slice >= 0, "events_in_slice", self.events_in_slice),
+            (self.events_unique >= 0, "events_unique", self.events_unique),
             (self.hourly_buckets_written >= 0, "hourly_buckets_written", self.hourly_buckets_written),
             (
-                self.hourly_buckets_written <= self.events_consumed,
+                self.events_in_slice <= self.events_read,
+                "events_in_slice",
+                self.events_in_slice,
+            ),
+            (
+                self.events_unique <= self.events_in_slice,
+                "events_unique",
+                self.events_unique,
+            ),
+            (
+                self.hourly_buckets_written <= self.events_unique,
                 "hourly_buckets_written",
                 self.hourly_buckets_written,
             ),
@@ -108,28 +141,48 @@ class TripCompletedConsumerResult(_Validated):
 
 
 def consume_and_aggregate(
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    # Five arguments are intrinsic to the bounded-full-slice-replay run:
+    # consumer config, sink config, and the three slice-metadata fields
+    # that constitute the run identity per design log decision 42.
     consumer_config: TripCompletedConsumerConfig,
     sink_config: object,
+    cab_type: str,
+    year: int,
+    month: int,
 ) -> TripCompletedConsumerResult:
     """Drain Kafka, aggregate, and upsert hourly counts to Postgres.
 
-    The flow is:
+    Per design log decision 42 (bounded full-slice replay), the flow is:
 
         1. Build a ``confluent_kafka.Consumer`` from ``consumer_config``.
         2. Subscribe to ``consumer_config.topic``.
-        3. Poll until ``max_idle_polls`` consecutive empty polls occur.
-        4. For each message: deserialize a
-           :class:`~nyc_cab_events.contracts.events.TripCompleted` event and
-           increment the in-memory aggregator at
+        3. Capture end-of-partition offsets via
+           ``Consumer.get_watermark_offsets`` — the deterministic replay
+           window.
+        4. Poll forward until each partition reaches its captured end
+           offset, then stop. ``consumer_config.poll_timeout_seconds``
+           is the per-poll blocking time; it is not a termination
+           criterion.
+        5. For each message: deserialize a
+           :class:`~nyc_cab_events.contracts.events.TripCompleted`
+           event, filter to the requested ``(cab_type, year, month)``
+           slice, deduplicate in memory on ``event_id``, and increment
+           the in-memory aggregator at
            ``(cab_type, year, month, hour)``.
-        5. Call :func:`~nyc_cab_events.sink.postgres.upsert_hourly_counts`
-           with the aggregator buckets.
-        6. Commit Kafka offsets.
+        6. Call :func:`~nyc_cab_events.sink.postgres.upsert_hourly_counts`
+           with the aggregator buckets. Overwrite-on-conflict semantics
+           make the run's count the single source of truth for the
+           slice's rows.
         7. Return a :class:`TripCompletedConsumerResult`.
 
-    The ``sink_config`` argument is typed as :class:`object` only until the
-    Postgres sink config dataclass moves from an in-function import to a
-    module-level import alongside this stub being filled in.
+    Kafka offsets are not committed back to the broker. The contract is
+    "read the complete slice or write nothing"; a crashed run is
+    recovered by re-running the slice, not by resuming.
+
+    The ``sink_config`` argument is typed as :class:`object` only until
+    the Postgres sink config dataclass moves from an in-function import
+    to a module-level import alongside this stub being filled in.
     """
     # pylint: disable=unused-argument
     raise NotImplementedError(

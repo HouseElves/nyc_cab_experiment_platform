@@ -3,36 +3,38 @@
 """
 Define the trip-completed event consumer.
 
-The consumer reads ``trip.completed.v1`` from Kafka, aggregates events by
-``(cab_type, year, month, hour)`` — the hour is event-time from
-``tpep_pickup_datetime``, not processing time (design log decision 33) —
-and writes upserts into the Postgres ``trip_completed_hourly`` table.
+The consumer implements bounded full-slice replay per design log
+decision 42, not incremental resume. Each invocation processes one
+``(cab_type, year, month)`` slice by:
 
-The consumer is convergent within a single replay window: re-running the
-batch consumer against the same Kafka topic state produces the same
-final aggregate. Two equally valid runs:
+1. Capturing Kafka end-of-partition offsets at start of run via
+   :meth:`Consumer.get_watermark_offsets` — the deterministic replay
+   window. Idle-timeout polling is rejected (decision 42) because a
+   slow broker could produce different inputs from the same topic
+   state across runs.
+2. Polling forward until each partition reaches its captured end
+   offset, then stopping.
+3. Deserializing each message and filtering to the requested slice in
+   application code.
+4. Deduplicating in memory on the deterministic ``event_id`` (decision
+   36). Producer reruns emit byte-identical events with identical ids;
+   the seen-set collapses them in O(1) per event.
+5. Accumulating hourly counts keyed on ``(cab_type, year, month,
+   hour)``; the hour is event-time from ``tpep_pickup_datetime``, not
+   processing time (decision 33).
+6. Writing the complete slice through
+   :func:`~nyc_cab_events.sink.postgres.upsert_hourly_counts`, whose
+   overwrite-on-conflict semantics make the consumer's count the
+   single source of truth for the row.
 
-- Cold start: read from offset 0, aggregate, write upserts. The upsert
-  on the primary key ``(cab_type, year, month, hour)`` overwrites the
-  row's count with the new full count.
-- Resume: read from the committed offset; the partial new events get
-  aggregated and merged with the existing row count via the same
-  upsert.
+The contract is: read the complete slice or write nothing. Crashes are
+recoverable by re-running the slice; mid-slice resume is not supported
+and the consumer does not commit Kafka offsets back to the broker.
 
-End-to-end exactly-once is **not** automatic from the upsert alone. If
-the producer reruns and emits duplicate events (deterministic
-``event_id`` means the same event is reproduced byte-identical), a
-fresh consumer group reading the topic from offset 0 will count each
-duplicate, and the upsert will faithfully write the doubled count. The
-consumer implementation is responsible for per-event deduplication
-keyed on ``event_id`` when cross-replay safety matters; the mechanism
-(in-memory seen-set, persistent dedup table, or bounded-window
-replacement) is documented in design log decision 34.
-
-This module exists at scaffolding stage; the heavy bits —
-``confluent_kafka.Consumer`` polling loop, deserialization, the in-memory
-aggregator, the Postgres upsert call — are ``NotImplementedError`` stubs
-covered by stub tests per design log decision 25.
+This module is at scaffolding stage; ``consume_and_aggregate`` is a
+``NotImplementedError`` stub covered by a stub test per decision 25,
+and the heavy imports (:mod:`confluent_kafka`, :mod:`psycopg`) live
+inside the stub. They move to module level when the stub is filled in.
 
 Consumer Flow
 -------------
@@ -44,20 +46,29 @@ Consumer Flow
         participant Caller as CLI / Airflow
         participant Consumer as consumer.trip_completed
         participant Kafka as confluent_kafka.Consumer
+        participant SeenSet as in-memory seen-set
         participant Aggregator as in-memory aggregator
         participant Sink as sink.postgres
 
-        Caller->>Consumer: consume_and_aggregate(consumer_config, sink_config)
+        Caller->>Consumer: consume_and_aggregate(consumer_config, sink_config, cab_type, year, month)
         Consumer->>Kafka: subscribe([trip.completed.v1])
-        loop poll until idle (or max_messages reached)
-            Consumer->>Kafka: poll(timeout)
+        Consumer->>Kafka: get_watermark_offsets() per partition
+        Kafka-->>Consumer: end-offset map (the replay window)
+        loop poll until each partition reaches captured end offset
+            Consumer->>Kafka: poll(poll_timeout_seconds)
             Kafka-->>Consumer: ConsumerRecord (event payload + key)
-            Consumer->>Consumer: deserialize TripCompleted
-            Consumer->>Aggregator: increment[(cab_type, year, month, hour)]
+            Consumer->>Consumer: deserialize TripCompleted, filter to slice
+            Consumer->>SeenSet: contains(event_id)?
+            alt event_id new
+                SeenSet-->>Consumer: false
+                Consumer->>SeenSet: add(event_id)
+                Consumer->>Aggregator: increment[(cab_type, year, month, hour)]
+            else event_id seen
+                SeenSet-->>Consumer: true (skip)
+            end
         end
         Consumer->>Sink: upsert_hourly_counts(buckets)
         Sink-->>Consumer: rows_affected
-        Consumer->>Kafka: commit()
         Consumer-->>Caller: TripCompletedConsumerResult
 
 Class Relationships
@@ -79,12 +90,16 @@ Class Relationships
             string group_id
             string topic
             integer poll_timeout_seconds
-            integer max_idle_polls
         }
 
         class TripCompletedConsumerResult {
             <<immutable>>
-            integer events_consumed
+            string cab_type
+            integer year
+            integer month
+            integer events_read
+            integer events_in_slice
+            integer events_unique
             integer hourly_buckets_written
         }
 

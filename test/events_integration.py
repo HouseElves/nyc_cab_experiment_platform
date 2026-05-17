@@ -19,11 +19,12 @@ The expected end state is a :class:`ReconciliationResult` with
 ``postgres`` because it needs both services up (via the project's
 ``docker-compose.yml``).
 
-At scaffolding stage every step is a ``NotImplementedError`` stub. This
-file's *current* role is to fail loudly the moment any of those stubs is
-silently replaced without a real test taking its place (design log
-decision 25). When the stubs land, this test is rewritten to drive the
-real loop and re-marked appropriately.
+At present three of the four steps are real (ensure_table, producer,
+reconcile) and the consumer step remains a ``NotImplementedError`` stub
+guarded by a ``pytest.raises`` test per design log decision 25. When
+the consumer milestone lands, these per-step tests collapse into one
+end-to-end ``test_producer_through_reconcile`` test that drives the
+full loop.
 """
 
 from __future__ import annotations
@@ -36,15 +37,19 @@ from nyc_cab_events.consumer.trip_completed import (
 )
 from nyc_cab_events.producer.trip_completed import TripCompletedProducerConfig
 from nyc_cab_events.sink.postgres import (
+    TRIP_COMPLETED_HOURLY_TABLE,
     PostgresSinkConfig,
+    _connect,
     ensure_table,
     reconcile_against_silver,
 )
 
 
-# Markers reflect what the *implemented* test will need. The current bodies
-# are unit-level stub assertions; the markers are forward-looking so the
-# integration marker contract is stable when the stubs are filled in.
+# Three of four steps are real (ensure_table, producer, reconcile) and
+# require their respective services up; the consumer step remains a
+# NotImplementedError stub per design log decision 25. All four tests
+# are marked kafka and postgres so the module's marker contract is
+# stable when Phase B collapses these into one end-to-end test.
 pytestmark = [pytest.mark.kafka, pytest.mark.postgres]
 
 
@@ -69,7 +74,6 @@ def consumer_config() -> TripCompletedConsumerConfig:
         "nyc-cab-events-integration",
         "trip.completed.v1",
         5,
-        3,
     )
 
 
@@ -81,13 +85,41 @@ def sink_config() -> PostgresSinkConfig:
     )
 
 
-# --- Stub coverage (decision 25) --------------------------------------------
+@pytest.fixture
+def empty_aggregate_table(sink_config: PostgresSinkConfig):
+    """Yield with ``trip_completed_hourly`` present and empty.
+
+    Ensures the table exists, truncates it before the test, and truncates
+    again after. Required by tests that assert on the table's contents
+    (e.g. an empty-slice reconciliation result), since other tests in
+    this module or others may have left rows behind. Mirrors the
+    ``clean_table`` fixture in :mod:`nyc_cab_events.sink.test.postgres`;
+    duplication is tolerated under decision 28 until a shared-vocabulary
+    conftest is justified.
+    """
+    ensure_table(sink_config)
+    with _connect(sink_config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"TRUNCATE TABLE {TRIP_COMPLETED_HOURLY_TABLE}")
+        conn.commit()
+    yield
+    with _connect(sink_config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"TRUNCATE TABLE {TRIP_COMPLETED_HOURLY_TABLE}")
+        conn.commit()
 
 
-def test_ensure_table_step_is_not_implemented(sink_config: PostgresSinkConfig) -> None:
-    """The first step of the integration loop (table creation) is a stub."""
-    with pytest.raises(NotImplementedError):
-        ensure_table(sink_config)
+# --- Per-step integration coverage ------------------------------------------
+
+
+def test_ensure_table_step_is_idempotent(sink_config: PostgresSinkConfig) -> None:
+    """The first step of the integration loop creates the aggregate table idempotently.
+
+    Requires docker-compose up. Two calls back-to-back should both
+    succeed; the second is a no-op via ``IF NOT EXISTS``.
+    """
+    ensure_table(sink_config)
+    ensure_table(sink_config)
 
 
 def test_producer_step_emits_events_to_kafka(
@@ -95,14 +127,23 @@ def test_producer_step_emits_events_to_kafka(
 ) -> None:
     """The producer step writes events to a live Kafka broker.
 
-    Requires docker-compose up. Builds a synthetic Silver partition with
-    two clean rows and one bad row, runs the producer, and confirms the
-    returned result satisfies the reconciliation invariant.
+    Requires docker-compose up. Calls :func:`ensure_topics` first because
+    the docker-compose Kafka broker has auto-topic-creation disabled
+    (intentionally — production brokers typically do too); without this
+    setup step the produce calls would fail against a freshly-started
+    broker. Then builds a synthetic Silver partition with two clean rows
+    and one bad row, runs the producer, and confirms the returned result
+    satisfies the reconciliation invariant.
     """
     # pylint: disable=import-outside-toplevel
     from datetime import datetime as _dt
     from pyspark.sql import SparkSession
-    from nyc_cab_events.producer.trip_completed import produce_trip_completed_events
+    from nyc_cab_events.producer.trip_completed import (
+        ensure_topics,
+        produce_trip_completed_events,
+    )
+
+    ensure_topics(producer_config)
 
     spark = (
         SparkSession.builder
@@ -145,10 +186,29 @@ def test_consumer_step_is_not_implemented(
 ) -> None:
     """The consumer-aggregate-sink step of the integration loop is a stub."""
     with pytest.raises(NotImplementedError):
-        consume_and_aggregate(consumer_config=consumer_config, sink_config=sink_config)
+        consume_and_aggregate(
+            consumer_config=consumer_config,
+            sink_config=sink_config,
+            cab_type="yellow",
+            year=2023,
+            month=1,
+        )
 
 
-def test_reconcile_step_is_not_implemented(sink_config: PostgresSinkConfig) -> None:
-    """The reconciliation step of the integration loop is a stub."""
-    with pytest.raises(NotImplementedError):
-        reconcile_against_silver(sink_config, "yellow", 2023, 1, 0)
+def test_reconcile_step_returns_validated_result(
+    sink_config: PostgresSinkConfig, empty_aggregate_table,
+) -> None:
+    """The reconciliation step queries the sink and returns a validated result.
+
+    Requires docker-compose up. The ``empty_aggregate_table`` fixture
+    truncates ``trip_completed_hourly`` before the test runs so the
+    slice is guaranteed empty regardless of other tests in this module
+    or earlier runs. Reconciles the (yellow, 2023, 1) slice against a
+    Silver count of zero; both sides agree, so the result is reconciled.
+    The full-loop variant of this assertion lands when the consumer
+    milestone collapses these per-step tests into one end-to-end test.
+    """
+    _ = empty_aggregate_table  # fixture's setup/teardown is the contract
+    result = reconcile_against_silver(sink_config, "yellow", 2023, 1, 0)
+    assert result.is_reconciled is True
+    assert result.postgres_event_count == 0

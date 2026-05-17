@@ -83,10 +83,16 @@ Bronze and Silver integration testing is each split into two tiers:
   accepted/rejected ratios, reconciliation, partition output, and
   February schema-drift compatibility against live source data.
 - **Tier 1 (`test/events_integration.py`):** 4 tests marked
-  `@pytest.mark.kafka` and `@pytest.mark.postgres`, currently scaffolded
-  against the `NotImplementedError` stubs in the events package. Will drive
-  the full Silver → producer → Kafka → consumer → Postgres → reconcile loop
-  once the stubs land. Requires the project `docker-compose.yml`.
+  `@pytest.mark.kafka` and `@pytest.mark.postgres`. Three steps are
+  real — `ensure_table` idempotency, producer-to-Kafka emission (calls
+  `ensure_topics` first since the docker-compose broker has
+  auto-topic-creation off), and the reconcile-step round-trip against
+  a clean aggregate table. The consumer step remains a
+  `NotImplementedError` stub guarded by `pytest.raises` per design log
+  decision 25; Phase B replaces it and collapses the four per-step
+  tests into one end-to-end test that drives the full Silver →
+  producer → Kafka → consumer → Postgres → reconcile loop. Requires
+  the project `docker-compose.yml`.
 
 Expected future root-level coverage includes:
 
@@ -208,8 +214,11 @@ docker compose up -d zookeeper kafka postgres
 Container names are deterministic (`nyc_cab_events_zookeeper`,
 `nyc_cab_events_kafka`, `nyc_cab_events_postgres`) and all three services
 have health checks. Kafka auto-topic-creation is intentionally off; the
-producer creates `trip.completed.v1` and `trip.completed.v1.invalid`
-explicitly so the test bed mirrors the deployed surface.
+producer module exposes `ensure_topics(producer_config)` which creates
+`trip.completed.v1` and `trip.completed.v1.invalid` idempotently. Call
+it once before the first `produce_trip_completed_events` invocation so
+the test bed mirrors the deployed surface where topic creation is an
+explicit admin step.
 
 ## Status
 
@@ -264,13 +273,20 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   and returns a `TripCompletedProducerResult` whose reconciliation
   invariant (`silver_read_count == events_emitted + events_quarantined`)
   proves no rows were lost
-- Consumer and sink modules ship validated config and result dataclasses;
-  the sink's derivation-consistency check on `ReconciliationResult` is
-  enforced structurally
-- Remaining heavy operations (`consume_and_aggregate`, `ensure_table`,
-  `upsert_hourly_counts`, `reconcile_against_silver`) are
-  `NotImplementedError` stubs, each covered by a matching `pytest.raises`
-  test per design log decision 25
+- Postgres sink complete: `ensure_table` applies the
+  `TRIP_COMPLETED_HOURLY_DDL` (CHECK constraints mirror
+  `HourlyBucket`'s structural rules at the DB layer for
+  defense-in-depth), `upsert_hourly_counts` uses the
+  overwrite-on-conflict semantics committed in design log decision 42
+  (`ON CONFLICT (cab_type, year, month, hour) DO UPDATE SET
+  event_count = EXCLUDED.event_count`) for bounded-replay convergence,
+  and `reconcile_against_silver` issues a slice-bounded
+  `SELECT COALESCE(SUM(event_count), 0)` and returns a
+  `ReconciliationResult` whose derivation invariant
+  (`is_reconciled == (silver == postgres)`) is enforced structurally
+- Consumer module ships validated config and result dataclasses;
+  `consume_and_aggregate` is the remaining `NotImplementedError` stub,
+  covered by a matching `pytest.raises` test per design log decision 25
 - `docker-compose.yml` brings up Kafka 7.6 + Zookeeper + Postgres 16 with
   deterministic container names and health checks; topic auto-creation is
   intentionally off
@@ -282,26 +298,25 @@ Silver layer complete. All transformation stubs replaced with tested implementat
 - events-package tests carry `unit`, `spark`, `kafka`, and `postgres`
   marks as appropriate; pylint 10/10 on the new package and 100% branch
   coverage on the events subpackage
-- Design log decisions 32–41 record the Kafka client choice, the
+- Design log decisions 32–42 record the Kafka client choice, the
   event-time bucketing rule, the Postgres-as-sink decision, the hour-grain
   `event_key`, contract-level `derive_event_id`, strict schema-version
   equality, strict JSON deserialization, the `toLocalIterator` driver
-  pattern, the headers-based quarantine metadata, and the slice-grain
-  quarantine key
+  pattern, the headers-based quarantine metadata, the slice-grain
+  quarantine key, and the v1 bounded full-slice replay consumer model
+  with its high-water-mark replay bound
 
-**Next milestone:** consume events idempotently into Postgres. Fill
-`ensure_table` (apply `TRIP_COMPLETED_HOURLY_DDL` via psycopg3),
-`consume_and_aggregate` (confluent_kafka poll loop, in-memory aggregator
-keyed on `(cab_type, year, month, hour)`, sink call, offset commit), and
-`upsert_hourly_counts` (`INSERT ... ON CONFLICT (cab_type, year, month,
-hour) DO UPDATE` for bounded-replay convergence). Cross-replay
-idempotency — where the producer has rerun and a fresh consumer group
-sees duplicate events — requires per-event deduplication on the
-deterministic `event_id`; the specific mechanism (in-memory seen-set,
-persistent dedup table, or bounded-window replacement) is part of
-this milestone's design. Sets up the final milestone:
-`reconcile_against_silver` queries the sink and compares the monthly
-sum against Silver's `accepted_count`.
+**Next milestone:** implement the v1 consumer per design log decision
+42. `consume_and_aggregate` takes `(cab_type, year, month)` as the run
+identity, queries Kafka end-of-partition offsets at start of run as the
+deterministic replay window (rather than idle-timeout polling), reads
+the topic forward to those offsets, deserializes each event,
+filters to the requested slice, deduplicates in memory on the
+deterministic `event_id`, accumulates hourly counts, and writes the
+complete slice through `upsert_hourly_counts`. The contract is "read
+the complete slice or write nothing"; crashes are recoverable by
+re-running the slice. This milestone closes the loop: producer →
+Kafka → consumer → Postgres → reconcile.
 
 ## Roadmap
 

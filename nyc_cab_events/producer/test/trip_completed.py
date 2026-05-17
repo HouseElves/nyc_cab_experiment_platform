@@ -32,7 +32,12 @@ from nyc_cab_events.producer.trip_completed import (
     produce_trip_completed_events,
 )
 
-pytestmark = pytest.mark.unit
+
+# Module-level ``pytestmark = pytest.mark.unit`` is intentionally absent.
+# Unit-tier tests are marked individually with ``@pytest.mark.unit`` so the
+# ``@pytest.mark.spark`` driver tests further down do not inherit the
+# ``unit`` mark; a module-level mark would make ``pytest -m unit`` try to
+# run the Spark tests.
 
 
 # --- Fixtures ---------------------------------------------------------------
@@ -71,6 +76,7 @@ def producer_config() -> TripCompletedProducerConfig:
 # --- TripCompletedProducerConfig: happy paths -------------------------------
 
 
+@pytest.mark.unit
 def test_config_happy_path() -> None:
     """A well-formed config constructs cleanly."""
     config = TripCompletedProducerConfig.create_validated(
@@ -81,6 +87,7 @@ def test_config_happy_path() -> None:
     assert config.quarantine_topic == TRIP_COMPLETED_QUARANTINE_TOPIC
 
 
+@pytest.mark.unit
 def test_config_defaults_to_v1_topics() -> None:
     """Direct construction with defaults uses the v1 contract topic names."""
     config = TripCompletedProducerConfig(bootstrap_servers="localhost:9092")
@@ -91,6 +98,7 @@ def test_config_defaults_to_v1_topics() -> None:
 # --- TripCompletedProducerConfig: type rejections ---------------------------
 
 
+@pytest.mark.unit
 def test_config_rejects_non_string_bootstrap() -> None:
     """``bootstrap_servers`` must be a string."""
     with pytest.raises(InvalidRequestError) as info:
@@ -99,6 +107,7 @@ def test_config_rejects_non_string_bootstrap() -> None:
     assert "bootstrap_servers" in names
 
 
+@pytest.mark.unit
 def test_config_rejects_non_string_topic() -> None:
     """``topic`` must be a string."""
     with pytest.raises(InvalidRequestError) as info:
@@ -107,6 +116,7 @@ def test_config_rejects_non_string_topic() -> None:
     assert "topic" in names
 
 
+@pytest.mark.unit
 def test_config_rejects_non_string_quarantine_topic() -> None:
     """``quarantine_topic`` must be a string."""
     with pytest.raises(InvalidRequestError) as info:
@@ -118,6 +128,7 @@ def test_config_rejects_non_string_quarantine_topic() -> None:
 # --- TripCompletedProducerConfig: structural rejections ---------------------
 
 
+@pytest.mark.unit
 def test_config_rejects_blank_bootstrap_servers() -> None:
     """Blank bootstrap_servers violates the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -125,6 +136,7 @@ def test_config_rejects_blank_bootstrap_servers() -> None:
     assert ("bootstrap_servers", "   ") in info.value.violations
 
 
+@pytest.mark.unit
 def test_config_rejects_blank_topic() -> None:
     """Blank topic violates the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -132,6 +144,7 @@ def test_config_rejects_blank_topic() -> None:
     assert ("topic", "") in info.value.violations
 
 
+@pytest.mark.unit
 def test_config_rejects_blank_quarantine_topic() -> None:
     """Blank quarantine_topic violates the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -139,6 +152,7 @@ def test_config_rejects_blank_quarantine_topic() -> None:
     assert ("quarantine_topic", "") in info.value.violations
 
 
+@pytest.mark.unit
 def test_config_rejects_topic_equals_quarantine_topic() -> None:
     """The two topic fields must differ — otherwise quarantine routing collapses."""
     with pytest.raises(InvalidRequestError) as info:
@@ -147,6 +161,7 @@ def test_config_rejects_topic_equals_quarantine_topic() -> None:
     assert "quarantine_topic" in names
 
 
+@pytest.mark.unit
 def test_config_is_frozen() -> None:
     """``TripCompletedProducerConfig`` rejects attribute mutation."""
     config = TripCompletedProducerConfig.create_validated("localhost:9092", "t", "q")
@@ -165,6 +180,7 @@ def silver_path(tmp_path: Path) -> Path:
     return partition
 
 
+@pytest.mark.unit
 def test_result_happy_path(silver_path: Path) -> None:
     """A well-formed result satisfies the reconciliation invariant."""
     result = TripCompletedProducerResult.create_validated(
@@ -175,6 +191,7 @@ def test_result_happy_path(silver_path: Path) -> None:
     assert result.events_quarantined == 50
 
 
+@pytest.mark.unit
 def test_result_happy_path_zero_quarantine(silver_path: Path) -> None:
     """A run with no quarantined events is valid."""
     result = TripCompletedProducerResult.create_validated(
@@ -183,6 +200,7 @@ def test_result_happy_path_zero_quarantine(silver_path: Path) -> None:
     assert result.events_quarantined == 0
 
 
+@pytest.mark.unit
 def test_result_happy_path_empty_partition(silver_path: Path) -> None:
     """A zero-row partition produces a zero-event result."""
     result = TripCompletedProducerResult.create_validated(
@@ -194,6 +212,7 @@ def test_result_happy_path_empty_partition(silver_path: Path) -> None:
 # --- TripCompletedProducerResult: type rejections ---------------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_bool_year(silver_path: Path) -> None:
     """``year`` rejects bool despite int compatibility."""
     with pytest.raises(InvalidRequestError) as info:
@@ -203,6 +222,7 @@ def test_result_rejects_bool_year(silver_path: Path) -> None:
     assert ("year", True) in info.value.violations
 
 
+@pytest.mark.unit
 def test_result_rejects_bool_month(silver_path: Path) -> None:
     """``month`` rejects bool despite int compatibility."""
     with pytest.raises(InvalidRequestError) as info:
@@ -212,6 +232,7 @@ def test_result_rejects_bool_month(silver_path: Path) -> None:
     assert ("month", True) in info.value.violations
 
 
+@pytest.mark.unit
 def test_result_rejects_non_path_silver_partition_path() -> None:
     """``silver_partition_path`` must be a :class:`Path` instance."""
     with pytest.raises(InvalidRequestError) as info:
@@ -225,6 +246,7 @@ def test_result_rejects_non_path_silver_partition_path() -> None:
 # --- TripCompletedProducerResult: structural rejections ---------------------
 
 
+@pytest.mark.unit
 def test_result_rejects_negative_emitted(silver_path: Path) -> None:
     """Negative ``events_emitted`` violates the structural rule."""
     with pytest.raises(InvalidRequestError) as info:
@@ -234,6 +256,7 @@ def test_result_rejects_negative_emitted(silver_path: Path) -> None:
     assert ("events_emitted", -1) in info.value.violations
 
 
+@pytest.mark.unit
 def test_result_rejects_reconciliation_mismatch(silver_path: Path) -> None:
     """The reconciliation invariant is enforced at construction time."""
     with pytest.raises(InvalidRequestError) as info:
@@ -244,6 +267,7 @@ def test_result_rejects_reconciliation_mismatch(silver_path: Path) -> None:
     assert "reconciliation" in names
 
 
+@pytest.mark.unit
 def test_result_rejects_silver_partition_path_pointing_at_file(tmp_path: Path) -> None:
     """``silver_partition_path`` must not refer to a regular file."""
     file_path = tmp_path / "not_a_dir"
@@ -256,6 +280,7 @@ def test_result_rejects_silver_partition_path_pointing_at_file(tmp_path: Path) -
     assert "silver_partition_path" in names
 
 
+@pytest.mark.unit
 def test_result_accepts_nonexistent_silver_partition_path(tmp_path: Path) -> None:
     """A not-yet-materialized partition path is allowed (mirrors SilverTransformResult)."""
     missing = tmp_path / "does" / "not" / "exist"
@@ -265,6 +290,7 @@ def test_result_accepts_nonexistent_silver_partition_path(tmp_path: Path) -> Non
     assert result.silver_partition_path == missing
 
 
+@pytest.mark.unit
 def test_result_is_frozen(silver_path: Path) -> None:
     """``TripCompletedProducerResult`` rejects attribute mutation."""
     result = TripCompletedProducerResult.create_validated(
@@ -277,16 +303,19 @@ def test_result_is_frozen(silver_path: Path) -> None:
 # --- _hour_of ---------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_hour_of_extracts_local_hour() -> None:
     """The local hour-of-day is the field's ``.hour`` attribute (NYC local time)."""
     assert _hour_of(datetime(2023, 1, 15, 14, 30)) == 14
 
 
+@pytest.mark.unit
 def test_hour_of_midnight() -> None:
     """Midnight renders as hour 0."""
     assert _hour_of(datetime(2023, 1, 15, 0, 0)) == 0
 
 
+@pytest.mark.unit
 def test_hour_of_eleven_pm() -> None:
     """11 PM renders as hour 23."""
     assert _hour_of(datetime(2023, 1, 15, 23, 59)) == 23
@@ -295,6 +324,7 @@ def test_hour_of_eleven_pm() -> None:
 # --- _build_event_from_silver_row -------------------------------------------
 
 
+@pytest.mark.unit
 def test_build_event_happy_path(silver_row: dict[str, Any], produced_at: datetime) -> None:
     """A well-formed Silver row builds a valid event."""
     event = _build_event_from_silver_row(silver_row, "yellow", 2023, 1, produced_at)
@@ -310,6 +340,7 @@ def test_build_event_happy_path(silver_row: dict[str, Any], produced_at: datetim
     assert event.schema_version == SCHEMA_VERSION
 
 
+@pytest.mark.unit
 def test_build_event_id_is_deterministic(silver_row: dict[str, Any], produced_at: datetime) -> None:
     """Same Silver row builds the same event_id every time, regardless of produced_at."""
     later = datetime(2099, 1, 1, tzinfo=timezone.utc)
@@ -318,6 +349,7 @@ def test_build_event_id_is_deterministic(silver_row: dict[str, Any], produced_at
     assert e1.event_id == e2.event_id
 
 
+@pytest.mark.unit
 def test_build_event_id_differs_across_slices(silver_row: dict[str, Any], produced_at: datetime) -> None:
     """Same Silver row under different slice metadata yields different event_ids."""
     e_jan = _build_event_from_silver_row(silver_row, "yellow", 2023, 1, produced_at)
@@ -325,6 +357,7 @@ def test_build_event_id_differs_across_slices(silver_row: dict[str, Any], produc
     assert e_jan.event_id != e_feb.event_id
 
 
+@pytest.mark.unit
 def test_build_event_raises_on_missing_pickup_datetime(
     silver_row: dict[str, Any], produced_at: datetime,
 ) -> None:
@@ -334,6 +367,7 @@ def test_build_event_raises_on_missing_pickup_datetime(
         _build_event_from_silver_row(incomplete, "yellow", 2023, 1, produced_at)
 
 
+@pytest.mark.unit
 def test_build_event_rejects_invalid_passenger_count(
     silver_row: dict[str, Any], produced_at: datetime,
 ) -> None:
@@ -343,6 +377,7 @@ def test_build_event_rejects_invalid_passenger_count(
         _build_event_from_silver_row(bad_row, "yellow", 2023, 1, produced_at)
 
 
+@pytest.mark.unit
 def test_build_event_rejects_negative_fare_amount(
     silver_row: dict[str, Any], produced_at: datetime,
 ) -> None:
@@ -355,6 +390,7 @@ def test_build_event_rejects_negative_fare_amount(
 # --- _route_silver_row -----------------------------------------------------
 
 
+@pytest.mark.unit
 def test_route_clean_row_to_primary_topic(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -366,6 +402,7 @@ def test_route_clean_row_to_primary_topic(
     assert routed.key == "yellow/2023/01/14"
 
 
+@pytest.mark.unit
 def test_route_clean_row_payload_round_trips(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -379,6 +416,7 @@ def test_route_clean_row_payload_round_trips(
     assert event.hour == 14
 
 
+@pytest.mark.unit
 def test_route_clean_row_headers_carry_schema_version(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -389,6 +427,7 @@ def test_route_clean_row_headers_carry_schema_version(
     assert header_map["schema_version"] == SCHEMA_VERSION.encode("utf-8")
 
 
+@pytest.mark.unit
 def test_route_bad_row_to_quarantine(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -400,6 +439,7 @@ def test_route_bad_row_to_quarantine(
     assert routed.topic == TRIP_COMPLETED_QUARANTINE_TOPIC
 
 
+@pytest.mark.unit
 def test_route_missing_field_to_quarantine(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -411,6 +451,7 @@ def test_route_missing_field_to_quarantine(
     assert routed.topic == TRIP_COMPLETED_QUARANTINE_TOPIC
 
 
+@pytest.mark.unit
 def test_route_quarantine_headers_name_rejection_reason(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -424,6 +465,7 @@ def test_route_quarantine_headers_name_rejection_reason(
     assert "violations" in header_map
 
 
+@pytest.mark.unit
 def test_route_quarantine_key_has_monthly_grain(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -434,6 +476,7 @@ def test_route_quarantine_key_has_monthly_grain(
     assert routed.key == "yellow/2023/01"
 
 
+@pytest.mark.unit
 def test_route_quarantine_body_is_json_object(
     silver_row: dict[str, Any], produced_at: datetime,
     producer_config: TripCompletedProducerConfig,
@@ -447,6 +490,22 @@ def test_route_quarantine_body_is_json_object(
     assert body["year"] == 2023
     assert body["month"] == 1
     assert body["fare_amount"] == -1.0
+
+
+@pytest.mark.unit
+def test_route_uses_configured_quarantine_topic(
+    silver_row: dict[str, Any], produced_at: datetime,
+) -> None:
+    """The configured quarantine_topic on the producer config is honored
+    (regression test: prior implementation called ``quarantine_topic_for``
+    directly and silently ignored the config field)."""
+    override_config = TripCompletedProducerConfig.create_validated(
+        "localhost:9092", TRIP_COMPLETED_TOPIC, "scratch.quarantine.topic",
+    )
+    bad_row = {**silver_row, "fare_amount": -1.0}
+    routed = _route_silver_row(bad_row, "yellow", 2023, 1, override_config, produced_at)
+    assert routed.is_quarantine is True
+    assert routed.topic == "scratch.quarantine.topic"
 
 
 # --- Driver test with a fake Kafka producer ---------------------------------
@@ -491,6 +550,157 @@ def fake_producer(monkeypatch: pytest.MonkeyPatch) -> _FakeProducer:
         lambda _config: fake,
     )
     return fake
+
+
+class _FakeAdminFuture:
+    """Stand-in for the futures returned by ``AdminClient.create_topics``."""
+
+    # pylint: disable=too-few-public-methods
+    # One method is the entire contract of an admin future.
+
+    def __init__(self, raise_already_exists: bool = False) -> None:
+        self._raise = raise_already_exists
+
+    def result(self) -> None:
+        """Either return cleanly or raise a properly-coded KafkaException.
+
+        When the test wants to simulate the "topic already exists" path,
+        we raise ``KafkaException(KafkaError(TOPIC_ALREADY_EXISTS))`` so
+        the production code's error-code inspection path is the one
+        actually exercised.
+        """
+        if self._raise:
+            # pylint: disable=import-outside-toplevel
+            from confluent_kafka import KafkaError as _KafkaError
+            from confluent_kafka import KafkaException as _KafkaException
+            raise _KafkaException(_KafkaError(_KafkaError.TOPIC_ALREADY_EXISTS))
+
+
+class _FakeAdminClient:
+    """Recording stand-in for ``confluent_kafka.admin.AdminClient``.
+
+    Captures every ``create_topics`` call and returns a dict of fake
+    futures keyed by the topic name (matching the real API shape).
+    """
+
+    # pylint: disable=too-few-public-methods
+    # One method is the entire contract this fake needs to implement
+    # for ensure_topics' production code path.
+
+    def __init__(self, *, raise_already_exists: bool = False) -> None:
+        self.create_topics_calls: list[list] = []
+        self._raise_already_exists = raise_already_exists
+
+    def create_topics(self, new_topics: list) -> dict:
+        """Record the call and return per-topic futures."""
+        self.create_topics_calls.append(new_topics)
+        return {
+            nt.topic: _FakeAdminFuture(self._raise_already_exists)
+            for nt in new_topics
+        }
+
+
+@pytest.fixture
+def fake_admin(monkeypatch: pytest.MonkeyPatch) -> _FakeAdminClient:
+    """Monkeypatch the AdminClient factory to return a recording fake."""
+    fake = _FakeAdminClient()
+    monkeypatch.setattr(
+        "nyc_cab_events.producer.trip_completed._make_admin_client",
+        lambda _config: fake,
+    )
+    return fake
+
+
+@pytest.fixture
+def fake_admin_topics_exist(monkeypatch: pytest.MonkeyPatch) -> _FakeAdminClient:
+    """Monkeypatch the AdminClient factory to return a fake that reports
+    every topic as already existing."""
+    fake = _FakeAdminClient(raise_already_exists=True)
+    monkeypatch.setattr(
+        "nyc_cab_events.producer.trip_completed._make_admin_client",
+        lambda _config: fake,
+    )
+    return fake
+
+
+# --- ensure_topics ----------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_ensure_topics_creates_primary_and_quarantine(
+    producer_config: TripCompletedProducerConfig, fake_admin: _FakeAdminClient,
+) -> None:
+    """``ensure_topics`` calls AdminClient.create_topics with both topic names."""
+    # pylint: disable=import-outside-toplevel
+    from nyc_cab_events.producer.trip_completed import ensure_topics
+    ensure_topics(producer_config)
+    assert len(fake_admin.create_topics_calls) == 1
+    topic_names = sorted(nt.topic for nt in fake_admin.create_topics_calls[0])
+    assert topic_names == sorted([TRIP_COMPLETED_TOPIC, TRIP_COMPLETED_QUARANTINE_TOPIC])
+
+
+@pytest.mark.unit
+def test_ensure_topics_uses_configured_topic_names(
+    fake_admin: _FakeAdminClient,
+) -> None:
+    """``ensure_topics`` honors the producer config's topic and quarantine_topic fields."""
+    # pylint: disable=import-outside-toplevel
+    from nyc_cab_events.producer.trip_completed import ensure_topics
+    override_config = TripCompletedProducerConfig.create_validated(
+        "localhost:9092", "scratch.primary", "scratch.quarantine",
+    )
+    ensure_topics(override_config)
+    topic_names = sorted(nt.topic for nt in fake_admin.create_topics_calls[0])
+    assert topic_names == ["scratch.primary", "scratch.quarantine"]
+
+
+@pytest.mark.unit
+def test_ensure_topics_is_idempotent_on_already_exists(
+    producer_config: TripCompletedProducerConfig, fake_admin_topics_exist: _FakeAdminClient,
+) -> None:
+    """``ensure_topics`` swallows the "topic already exists" error from the broker."""
+    # pylint: disable=import-outside-toplevel
+    from nyc_cab_events.producer.trip_completed import ensure_topics
+    ensure_topics(producer_config)  # must not raise
+    assert len(fake_admin_topics_exist.create_topics_calls) == 1
+
+
+@pytest.mark.unit
+def test_ensure_topics_propagates_other_kafka_errors(
+    monkeypatch: pytest.MonkeyPatch, producer_config: TripCompletedProducerConfig,
+) -> None:
+    """A KafkaException with a code other than TOPIC_ALREADY_EXISTS propagates.
+
+    Regression guardrail: the previous implementation matched on the
+    string ``"already exists"`` in the exception message, which could
+    silently swallow other failures (auth errors, network errors) whose
+    rendered text happened to contain that substring. The current
+    implementation inspects ``KafkaError.code()`` so unrelated errors
+    propagate.
+    """
+    # pylint: disable=import-outside-toplevel
+    from confluent_kafka import KafkaError as _KafkaError
+    from confluent_kafka import KafkaException as _KafkaException
+    from nyc_cab_events.producer.trip_completed import ensure_topics
+
+    class _AuthFailureFuture:
+        # pylint: disable=too-few-public-methods
+        def result(self) -> None:
+            """Raise an authentication-failure KafkaException unconditionally."""
+            raise _KafkaException(_KafkaError(_KafkaError._AUTHENTICATION))  # pylint: disable=protected-access
+
+    class _AuthFailureAdmin:
+        # pylint: disable=too-few-public-methods
+        def create_topics(self, new_topics: list) -> dict:
+            """Return a fake future per topic; each raises an auth error on .result()."""
+            return {nt.topic: _AuthFailureFuture() for nt in new_topics}
+
+    monkeypatch.setattr(
+        "nyc_cab_events.producer.trip_completed._make_admin_client",
+        lambda _config: _AuthFailureAdmin(),
+    )
+    with pytest.raises(_KafkaException):
+        ensure_topics(producer_config)
 
 
 @pytest.fixture(scope="module")

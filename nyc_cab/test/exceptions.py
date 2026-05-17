@@ -20,6 +20,8 @@ from nyc_cab.exceptions import (
     ValidationError,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def test_nyc_cab_error_extends_builtin_exception() -> None:
     """The platform base class is a plain :class:`Exception` subclass."""

@@ -27,13 +27,17 @@ jobs:
           path: "~/.cache/pip"
           key: "pip-${{ hashFiles('pyproject.toml', 'requirements.lock.txt') }}"
 
-      - name: "Install with dev extras"
-        run: "pip install -e .[dev]"
+      - name: "Install with dev and events extras"
+        # Events extras (confluent-kafka, psycopg) are required because the
+        # nyc_cab_events package imports them at module level in the
+        # producer and sink modules.
+        run: "pip install -e .[dev,events]"
 
       - name: "Run pylint"
         # Package-directory invocation avoids spurious invalid-name warnings
-        # on __init__.py files that file-by-file invocation produces.
-        run: "pylint nyc_cab/"
+        # on __init__.py files that file-by-file invocation produces. Both
+        # packages are linted to the same 10/10 gate.
+        run: "pylint nyc_cab/ nyc_cab_events/"
 
   test:
     name: "Test"
@@ -61,16 +65,21 @@ jobs:
           path: "~/.cache/pip"
           key: "pip-${{ hashFiles('pyproject.toml', 'requirements.lock.txt') }}"
 
-      - name: "Install with dev extras"
-        run: "pip install -e .[dev]"
+      - name: "Install with dev and events extras"
+        run: "pip install -e .[dev,events]"
 
       - name: "Run tests with coverage"
-        # -m "not live" excludes real TLC network downloads (pytest.mark.live).
-        # Runs all Tier 1 (fast) and Tier 2 (Spark) tests together until
-        # mark-based tier separation is implemented — see ci_architecture.md.
+        # Mark exclusions:
+        #   - "not live": TLC network downloads (pytest.mark.live)
+        #   - "not kafka": tests requiring docker-compose Kafka broker
+        #   - "not postgres": tests requiring docker-compose Postgres
+        # CI runs Tier 1 (fast) and Tier 2 (Spark) together; Tier 3
+        # integration runs are gated behind kafka/postgres marks and
+        # require docker-compose services that this lane does not start.
         run: >-
-          pytest -m "not live"
+          pytest -m "not live and not kafka and not postgres"
           --cov=nyc_cab
+          --cov=nyc_cab_events
           --cov-config=.coveragerc
           --cov-branch
           --cov-fail-under=90
@@ -92,7 +101,10 @@ jobs:
           key: "pip-${{ hashFiles('pyproject.toml', 'requirements.lock.txt') }}"
       - name: "Install runtime only"
         # Dev extras intentionally excluded: verifies the runtime dependency
-        # set in pyproject.toml is self-contained and complete.
+        # set in pyproject.toml is self-contained and complete for the base
+        # nyc_cab package. The nyc_cab_events package's runtime dependencies
+        # live under the [events] optional-dependencies group and are
+        # exercised separately by the lint and test jobs.
         run: "pip install -e ."
       - name: "Verify clean import"
         run: "python -c \"import nyc_cab; print('OK')\""
