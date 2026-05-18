@@ -5,8 +5,11 @@
 ## Overview
 
 The NYC Cab Experiment Platform implements a deterministic experimentation
-metrics platform on public NYC Taxi data, currently centered on Spark
-batch processing with a Kafka/Postgres event bridge in progress.
+metrics platform on public NYC Taxi data. It pairs Spark batch processing
+(Bronze → Silver) with a Kafka/Postgres event bridge that emits hourly
+trip-completed aggregates from Silver and reconciles them against Silver
+counts. Airflow orchestration is the next milestone — see the Status
+section for the platform's current operational shape.
 
 This system models key properties of modern experimentation platforms:
 
@@ -23,7 +26,7 @@ This system models key properties of modern experimentation platforms:
 | --- | --- | --- |
 | **Bronze** | Raw monthly trip ingestion to partitioned Parquet | Complete |
 | **Silver** | Normalized and validated trip records with derived metrics | Complete |
-| **Events** | Batch-event bridge: deterministic event emission from Silver, hourly aggregates in Postgres, reconciliation back against Silver counts | Scaffolded |
+| **Events** | Batch-event bridge: deterministic event emission from Silver, hourly aggregates in Postgres, reconciliation back against Silver counts | Complete |
 | **Orchestration** | Airflow-managed monthly replay/backfill DAGs for Bronze → Silver → Events reconciliation | Planned |
 | **Experiment** | Stable cohort assignment using deterministic hashing | Planned |
 | **Gold** | Cohort-based metric aggregation with windowed computation | Planned |
@@ -82,17 +85,18 @@ Bronze and Silver integration testing is each split into two tiers:
   real TLC downloads for January and February 2023, verifies plausible
   accepted/rejected ratios, reconciliation, partition output, and
   February schema-drift compatibility against live source data.
-- **Tier 1 (`test/events_integration.py`):** 4 tests marked
-  `@pytest.mark.kafka` and `@pytest.mark.postgres`. Three steps are
-  real — `ensure_table` idempotency, producer-to-Kafka emission (calls
-  `ensure_topics` first since the docker-compose broker has
-  auto-topic-creation off), and the reconcile-step round-trip against
-  a clean aggregate table. The consumer step remains a
-  `NotImplementedError` stub guarded by `pytest.raises` per design log
-  decision 25; Phase B replaces it and collapses the four per-step
-  tests into one end-to-end test that drives the full Silver →
-  producer → Kafka → consumer → Postgres → reconcile loop. Requires
-  the project `docker-compose.yml`.
+- **Tier 1 (`test/events_integration.py`):** 1 end-to-end test marked
+  `@pytest.mark.kafka`, `@pytest.mark.postgres`, and `@pytest.mark.spark`
+  at module level. Exercises the full loop — Silver → producer → Kafka
+  → consumer → Postgres → reconcile — against live services. Uses
+  per-run scratch Kafka topics with a UUID suffix (design log decision
+  46) to keep prior runs from poisoning reconciliation, session-scoped
+  Kafka and Postgres pre-flight probes that surface setup-level
+  failures with readable messages instead of raw librdkafka or psycopg
+  stack traces, and borrows the conftest's session-scoped `spark`
+  fixture rather than owning a SparkSession lifecycle locally.
+  Requires the project `docker-compose.yml` (or BYO Kafka and Postgres
+  with the documented `NYC_CAB_EVENTS_*` env-var overrides).
 
 Expected future root-level coverage includes:
 
@@ -143,8 +147,8 @@ pytest -m unit
 # Spark path only — fixture-backed PySpark tests
 pytest -m spark
 
-# Fast + Spark (excludes live TLC downloads)
-pytest -m "not live"
+# Fast + Spark (excludes live, kafka, and postgres — matches CI)
+pytest -m "not live and not kafka and not postgres"
 
 # Live tests only — requires network access
 pytest -m live
@@ -220,6 +224,33 @@ it once before the first `produce_trip_completed_events` invocation so
 the test bed mirrors the deployed surface where topic creation is an
 explicit admin step.
 
+If you prefer a system-managed Postgres over the docker-compose
+container, the events package requires a user `nyc_cab` and a
+database `nyc_cab_events` owned by that user:
+
+```bash
+sudo -u postgres psql <<'EOF'
+CREATE USER nyc_cab WITH PASSWORD 'nyc_cab';
+CREATE DATABASE nyc_cab_events OWNER nyc_cab;
+EOF
+```
+
+These values match the docker-compose defaults. If your local
+setup uses different credentials, override them via environment
+variables when running the integration tests:
+
+- `NYC_CAB_EVENTS_PG_HOST` (default `localhost`)
+- `NYC_CAB_EVENTS_PG_PORT` (default `5432`)
+- `NYC_CAB_EVENTS_PG_DATABASE` (default `nyc_cab_events`)
+- `NYC_CAB_EVENTS_PG_USER` (default `nyc_cab`)
+- `NYC_CAB_EVENTS_PG_PASSWORD` (default `nyc_cab`)
+- `NYC_CAB_EVENTS_KAFKA_BOOTSTRAP` (default `localhost:9092`)
+
+The `trip_completed_hourly` table is created idempotently by
+`ensure_table(sink_config)`, mirroring `ensure_topics` on the Kafka
+side. No manual DDL is required beyond the user/database bootstrap
+above.
+
 ## Status
 
 Silver layer complete. All transformation stubs replaced with tested implementations:
@@ -284,9 +315,25 @@ Silver layer complete. All transformation stubs replaced with tested implementat
   `SELECT COALESCE(SUM(event_count), 0)` and returns a
   `ReconciliationResult` whose derivation invariant
   (`is_reconciled == (silver == postgres)`) is enforced structurally
-- Consumer module ships validated config and result dataclasses;
-  `consume_and_aggregate` is the remaining `NotImplementedError` stub,
-  covered by a matching `pytest.raises` test per design log decision 25
+- Consumer module complete: `consume_and_aggregate` implements bounded
+  full-slice replay per design log decision 42, with `Consumer.assign`
+  over `Consumer.list_topics`-discovered partitions (decision 44), a
+  three-disposition `_classify_message` helper whose return value
+  partitions `events_read` into invalid / out-of-slice / in-slice
+  (decision 45), an in-loop replay-window guard that rejects messages
+  outside the captured high-water marks (decision 42 footnote),
+  in-memory dedup on the deterministic `event_id`, and driver-level
+  integrity invariants (`events_unique == sum(bucket.event_count)`;
+  `hourly_buckets_written == len(buckets)`) enforced inline at the
+  result-construction boundary. The contract is "read the complete
+  slice or write nothing"; Kafka offsets are not committed back to the
+  broker
+- End-to-end integration test (`test/events_integration.py`) exercises
+  the full loop — producer → Kafka → consumer → Postgres → reconcile —
+  against live services with per-run scratch topics (decision 46) and
+  session-scoped Kafka / Postgres pre-flight probes that surface
+  setup-level failures with readable messages rather than raw
+  librdkafka or psycopg stack traces
 - `docker-compose.yml` brings up Kafka 7.6 + Zookeeper + Postgres 16 with
   deterministic container names and health checks; topic auto-creation is
   intentionally off
@@ -298,25 +345,46 @@ Silver layer complete. All transformation stubs replaced with tested implementat
 - events-package tests carry `unit`, `spark`, `kafka`, and `postgres`
   marks as appropriate; pylint 10/10 on the new package and 100% branch
   coverage on the events subpackage
-- Design log decisions 32–42 record the Kafka client choice, the
+- Design log decisions 32–46 record the Kafka client choice, the
   event-time bucketing rule, the Postgres-as-sink decision, the hour-grain
   `event_key`, contract-level `derive_event_id`, strict schema-version
   equality, strict JSON deserialization, the `toLocalIterator` driver
   pattern, the headers-based quarantine metadata, the slice-grain
-  quarantine key, and the v1 bounded full-slice replay consumer model
-  with its high-water-mark replay bound
+  quarantine key, the v1 bounded full-slice replay consumer model with
+  its high-water-mark replay bound, the `Consumer.assign`-over-
+  `subscribe` choice, the disposition-enum classifier with its
+  driver-level integrity invariants and counter-promotion triggers, and
+  the per-run scratch-topic pattern for bounded-replay integration tests
 
-**Next milestone:** implement the v1 consumer per design log decision
-42. `consume_and_aggregate` takes `(cab_type, year, month)` as the run
-identity, queries Kafka end-of-partition offsets at start of run as the
-deterministic replay window (rather than idle-timeout polling), reads
-the topic forward to those offsets, deserializes each event,
-filters to the requested slice, deduplicates in memory on the
-deterministic `event_id`, accumulates hourly counts, and writes the
-complete slice through `upsert_hourly_counts`. The contract is "read
-the complete slice or write nothing"; crashes are recoverable by
-re-running the slice. This milestone closes the loop: producer →
-Kafka → consumer → Postgres → reconcile.
+**Next milestone:** minimal Airflow orchestration scaffolding. The
+pipeline currently runs as Python entrypoints tied together by the
+integration test; this milestone makes the medallion architecture a
+runnable platform rather than a collection of callable functions. In
+scope: a `dags/` directory at project root, a single parameterized
+DAG covering Bronze ingestion → Silver transformation → event-bridge
+(producer-through-reconcile) for one `(cab_type, year, month)` slice,
+LocalExecutor for development, and a docker-compose addition for the
+Airflow runtime. The scaffolding lands the operational substrate but
+deliberately stays minimal: no Celery, no Kubernetes operator, no
+custom executor — those wait until the platform's analytic surface
+expands enough to justify them.
+
+The design conversation this milestone owns: how Airflow's task-level
+retry semantics compose with decision 42's bounded-replay contract
+("read the complete slice or write nothing"); how the slice tuple
+parameterizes a DAG run (Airflow Variables vs. DAG params vs.
+Dataset-driven scheduling); whether Bronze → Silver → Events is one
+DAG or several (one operator per layer vs. Dataset-triggered DAG
+chains); and the orchestrator-selection alternatives-considered
+(Airflow vs. Dagster vs. Prefect, even if Airflow wins). These are
+the design-log entries the milestone will leave behind.
+
+Once orchestration lands, the platform has the operational baseline
+that the Roadmap items below extend. Metric versioning becomes
+"add a metric DAG and a versioning schema choice"; late-arriving
+data simulation becomes "second DAG that backfills mid-run"; and
+so on. The Roadmap stops being a list of disconnected analytic
+features and starts being incremental work on a running platform.
 
 ## Roadmap
 

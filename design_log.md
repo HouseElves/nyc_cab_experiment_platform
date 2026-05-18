@@ -1197,6 +1197,43 @@ these conditions fires:
   is no longer the right model. Persistent dedup + INCREMENT becomes
   the natural target.
 
+#### Implementation note: replay-window guard
+
+The "events arriving mid-run fall into the next replay" guarantee
+is load-bearing on an explicit in-loop guard in
+:func:`~nyc_cab_events.consumer.trip_completed.consume_and_aggregate`.
+Before incrementing ``events_read``, the driver checks:
+
+- ``partition in replay_window`` — rejects messages from partitions
+  that were empty at watermark capture but have since received
+  mid-run writes.
+- ``offset < replay_window[partition]`` — rejects messages whose
+  offset is at or beyond the captured high-water mark for a
+  partition that was non-empty at capture.
+
+A message that fails either check is silently dropped: not counted
+in ``events_read``, not classified, not added to the seen-set. It
+belongs to the next replay, not this one. The guard is necessary
+because ``Consumer.assign`` covers all partitions of the topic and
+``Consumer.poll`` delivers from every assigned partition regardless
+of the captured-watermark state — the broker has no concept of "the
+consumer's chosen window"; only the driver does. Without the guard,
+a concurrent producer write between watermark capture and loop
+termination would be counted in the current run's accounting and
+break the deterministic-window guarantee that this decision rests
+on.
+
+**Promotion to ``Consumer.pause``.** If one partition completes
+early and continues receiving mid-run writes that starve still-
+running partitions, the guard discards work without bounding it.
+The natural next step is
+``consumer.pause([TopicPartition(topic, p)])`` once
+``consumed_to[p] == replay_window[p] - 1`` for a partition,
+preventing further delivery from that partition until the loop
+terminates. At slice scale the guard alone is correct; ``pause``
+becomes the right move when an integration test or production run
+shows starvation symptoms.
+
 ### 43. Sink Connection Uses psycopg Keyword Arguments
 
 The Postgres sink's connection primitive (:func:`_connect` in
@@ -1258,6 +1295,332 @@ Alternatives considered:
   pool management is over-engineering. When the consumer becomes
   long-lived or high-frequency, pool management becomes the right
   refactor.
+
+### 44. Consumer Uses ``Consumer.assign``, Not ``Consumer.subscribe``
+
+The trip-completed consumer attaches to the topic via
+``Consumer.assign([TopicPartition(topic, p, 0) for p in partitions])``
+rather than ``Consumer.subscribe([topic])``. Partition identities are
+sourced from Kafka metadata at the start of the run via
+``Consumer.list_topics(topic)``, not from a hard-coded constant.
+
+#### Rationale
+
+Bounded full-slice replay (decision 42) is fundamentally a
+partition/offset operation: read each partition's ``[0, watermark]``
+range exactly once, then stop. Consumer-group semantics —
+coordinator-assigned partitions, committed offsets, rebalance — are
+not part of the correctness story. Using ``subscribe`` introduces a
+coordinator round-trip and a timing seam (the consumer must poll
+until ``assignment()`` is non-empty before it can capture watermarks)
+for behavior the v1 consumer does not use.
+
+Three concrete pressures point at ``assign``:
+
+1. **Correctness alignment.** Decision 42 commits to "read the
+   complete slice or write nothing" and explicitly does not commit
+   offsets back to the broker. A consumer that subscribes to a group
+   inherits group semantics (rebalance, committed-offset resumption)
+   that the contract refuses to honor. The simpler primitive matches
+   the simpler contract.
+
+2. **Determinism.** With ``assign``, the partition set is known
+   synchronously before the first poll, and watermark capture happens
+   inside a single deterministic window. ``subscribe`` requires
+   polling until rebalance completes before ``get_watermark_offsets``
+   can return meaningful values, which adds a timing-dependent setup
+   phase.
+
+3. **Test simplicity.** ``_FakeConsumer`` (the in-test recording
+   fake) implements ``assign``, ``assignment``,
+   ``get_watermark_offsets``, ``list_topics``, ``poll``, and
+   ``close``. No simulated rebalance protocol, no ``on_assign``
+   callback plumbing.
+
+Partition count comes from ``Consumer.list_topics(topic, timeout)``'s
+returned ``ClusterMetadata``, not from the producer-side
+``_TOPIC_NUM_PARTITIONS`` constant. The constant remains
+topic-creation contract on the producer side; reading it from the
+consumer would couple the two modules through a magic number rather
+than through the topic itself. A missing topic at consumer-run time
+(metadata carries a non-None error entry) raises ``KafkaException``
+and propagates — a deployment-time problem, not a recoverable empty
+run.
+
+#### Alternatives considered
+
+- **``Consumer.subscribe([topic])``.** Rejected per the rationale
+  above: group-coordinator semantics are not part of decision 42's
+  correctness story, and the timing seam between subscription and
+  partition assignment is friction for no value.
+- **Hard-coded partition count on the consumer side.** Rejected
+  because it couples the consumer to producer-side topic creation
+  details through a constant rather than through the topic itself.
+  If the topic is reprovisioned with a different partition count,
+  the consumer reads what's there.
+- **Static module-level partition list.** Rejected as the
+  pre-computed version of the hard-coded-count alternative; same
+  coupling problem.
+
+### 45. Consumer Run-Level Accounting Uses a Disposition Enum
+
+The consumer's per-message classification helper
+(``_classify_message``) returns a
+``_ConsumedMessage(disposition, event)`` where ``disposition`` is one
+of ``IN_SLICE``, ``OUT_OF_SLICE``, ``INVALID``. The driver maintains
+six run-level counters that partition the polled message stream:
+``events_read = events_invalid + events_out_of_slice +
+events_in_slice``, and ``events_in_slice = events_duplicate +
+events_unique``. The result dataclass
+``TripCompletedConsumerResult`` surfaces four of these
+(``events_read``, ``events_in_slice``, ``events_unique``,
+``hourly_buckets_written``); ``events_invalid`` and
+``events_duplicate`` are logged at INFO at run end but not stored on
+the result.
+
+#### Rationale
+
+The early draft helper returned ``TripCompleted | None``, collapsing
+invalid payloads and out-of-slice events into the same ``None``
+signal. That collapse loses operationally useful information: a
+wire-format drift (invalid, per decision 38) and a misaligned slice
+request (out-of-slice) have very different operational responses,
+but post-collapse the driver cannot distinguish them without
+re-deserializing or carrying side-channel state.
+
+Three pressures resolve to the disposition shape:
+
+1. **Accounting precision.** A run that polls 1000 messages and ends
+   with 950 in-slice and 50 dropped should be able to say *why* the
+   50 dropped — wire-format failures vs. wrong-slice messages. Both
+   numbers belong in the operator's diagnostic surface.
+
+2. **Pure-helper discipline.** The helper does not touch the
+   seen-set (the driver mutates it) and does not touch the
+   aggregator. It does own the deserialization-vs-filter decision;
+   returning that decision as a value rather than as a ``None``
+   collapse or a raised exception keeps the helper expressively
+   pure and trivially unit-testable.
+
+3. **Symmetry with ``EventRejectionReason``.** The producer-side
+   quarantine path uses an enum
+   (:class:`~nyc_cab_events.contracts.events.EventRejectionReason`)
+   to encode rejection cause; the consumer-side classification uses
+   a parallel enum (``_Disposition``) to encode classification
+   result. Same shape, same testability.
+
+#### Result-shape scope
+
+The original proposal added ``events_invalid`` and
+``events_duplicate`` as fields on ``TripCompletedConsumerResult``.
+The committed scope holds: the result dataclass shape stays as
+designed in scaffolding. The two extra counters are driver locals,
+logged at INFO at run end via ``consumer.done: read=%d invalid=%d
+out_of_slice=%d in_slice=%d duplicate=%d unique=%d buckets=%d``,
+mirroring the producer's ``producer.done: emitted=%d
+quarantined=%d`` line.
+
+The two relevant identities are noted in the consumer module
+docstring but not enforced as structural invariants on the result,
+since neither field is materialized on the dataclass:
+
+- ``events_invalid == events_read - events_out_of_slice - events_in_slice``
+- ``events_duplicate == events_in_slice - events_unique``
+
+#### Driver-level integrity invariants
+
+Two invariants connect the result counters to the bucket sequence
+handed to the sink. Neither can be a structural check on
+``TripCompletedConsumerResult`` alone (the buckets are not a field on
+the result), so the driver enforces them at the result-construction
+boundary with explicit ``raise RuntimeError``:
+
+- ``events_unique == sum(bucket.event_count for bucket in buckets)``.
+  Every unique event_id increments exactly one aggregator slot by one,
+  so the sum of bucket counts must equal the seen-set size.
+- ``hourly_buckets_written == len(buckets)``. The result counter is
+  the cardinality of the aggregator dict (one bucket per distinct
+  ``(cab_type, year, month, hour)`` key seen in-slice).
+
+Two further invariants are already structural on the result dataclass
+itself via ``_Validated.create_validated`` and ride along with result
+construction:
+
+- ``events_unique <= events_in_slice <= events_read`` (chained
+  monotonicity through filter and dedup).
+- ``hourly_buckets_written <= events_unique`` (hourly collapse is
+  monotonic).
+
+The additive identity ``events_read == events_invalid +
+events_out_of_slice + events_in_slice`` is *not* structurally
+enforceable (``events_invalid`` and ``events_out_of_slice`` are not
+materialized on the result), but it is documented in the consumer
+module docstring and tested directly via the INFO log line and
+indirectly via the observable result-field arithmetic. Any future
+disposition added to ``_Disposition`` must extend both the partition
+identity and its test coverage.
+
+``RuntimeError`` is chosen for the boundary checks rather than
+``assert``: assertions are stripped under ``python -O`` and the
+checks are cheap enough (one ``sum`` over a bounded bucket list) that
+production stripping is not a perf-driven concern. Failure here
+indicates a driver-loop implementation bug, not user input or
+operational state, so it is appropriate for the exception to be
+unrecoverable and loud.
+
+#### Triggers for promotion
+
+Promotion of ``events_invalid`` and ``events_duplicate`` to
+first-class fields on ``TripCompletedConsumerResult`` is appropriate
+when one of these conditions fires:
+
+- **Programmatic reconciliation consumes the counters.** If a
+  reconciliation, alerting, or dashboard layer needs to read these
+  values without parsing logs, they become public surface. The
+  pattern in
+  :class:`~nyc_cab_events.sink.postgres.ReconciliationResult` is the
+  natural template: materialized fields plus a derivation invariant
+  (``is_reconciled == (silver == postgres)``) enforced structurally.
+
+- **A new disposition appears.** If decision 42's contract expands
+  to cover, e.g., a ``STALE_SCHEMA_VERSION`` disposition distinct
+  from generic ``INVALID``, the result dataclass should surface
+  enough counters to distinguish the operationally relevant cases.
+  Adding a disposition without adding a counter loses information
+  at the run boundary.
+
+- **Multi-slice runs.** Decision 42 already flags multi-slice
+  consumer invocations as a promotion trigger toward a persistent
+  dedup table. When that lift happens, the result dataclass shape
+  changes anyway, and the additive fields ride along for free.
+
+The promotion is strictly additive: two new fields, two new
+structural-check tuples (each ``>= 0`` plus the derivation identities
+above as equalities). Existing invariants are unchanged. Existing
+callers that destructure the result by field name continue to work.
+
+#### Alternatives considered
+
+- **Helper returns ``TripCompleted | None``.** Rejected per the
+  rationale above: collapses ``INVALID`` and ``OUT_OF_SLICE`` into
+  one signal.
+- **Helper raises ``InvalidEventPayloadError`` and uses ``None`` only
+  for out-of-slice.** Considered. Rejected as exceptions-as-control-
+  flow: the helper would re-raise rather than return an
+  exception-as-value, and the driver would need a try/except around
+  what is otherwise pure transformation. The codebase's existing
+  pattern for "decision-as-value" is ``_RoutedMessage`` (producer)
+  and ``ReconciliationResult`` (sink), both dataclass-with-
+  discriminator; ``_ConsumedMessage`` follows the same idiom.
+- **Adding ``events_invalid`` and ``events_duplicate`` to the
+  result dataclass now.** Considered. Rejected for v1 in favor of
+  INFO logs; the promotion triggers above name the conditions that
+  flip this.
+- **Sibling diagnostics dataclass returned alongside the result.**
+  Rejected as YAGNI: a new public type for something INFO logs
+  cover at the current operational scope.
+
+### 46. Bounded-Replay Integration Tests Use Per-Run Scratch Topics
+
+The trip-completed end-to-end integration test
+(:mod:`test.events_integration`) generates a unique 8-character UUID
+suffix per test invocation and uses scratch Kafka topics named
+``trip.completed.v1.integration.<suffix>`` (plus
+``.<suffix>.invalid`` for the quarantine variant). The consumer
+``group_id`` is similarly suffixed. No admin-side topic cleanup is
+performed; topics survive the test and are removed when the broker
+is torn down (``docker-compose down`` locally; ephemeral CI broker
+otherwise).
+
+#### Rationale
+
+The bounded-replay contract (decision 42) reads every partition
+from offset 0 up to the captured high-water mark at run start.
+Reusing a stable topic across test runs poisons the reconciliation
+in three overlapping ways:
+
+1. **Prior in-slice events with different ``event_id``.** Producer
+   determinism (decision 36) guarantees byte-identical events from
+   byte-identical Silver inputs. The integration test rebuilds its
+   Silver fixture on each invocation, so the ``event_id`` values
+   are not stable across runs — the next run's seen-set has no
+   record of the prior run's events, dedup cannot collapse them,
+   and the consumer's ``events_unique`` exceeds the current run's
+   ``events_emitted``.
+
+2. **Prior out-of-slice events surviving accidentally.** Quarantined
+   or in-slice-but-wrong-month events from prior runs are still
+   delivered to ``poll`` (the broker has no slice concept) and waste
+   poll cycles. The classification is correct but the work is
+   unnecessary, and on a busy broker the loop's termination latency
+   grows with topic length rather than with slice size.
+
+3. **Asymmetric Postgres cleanup.** The
+   :data:`~test.events_integration.empty_aggregate_table` fixture
+   truncates the Postgres ``trip_completed_hourly`` table before
+   and after the test. Kafka has no symmetric truncate; topic-level
+   delete-and-recreate requires AdminClient surface that the test
+   would otherwise not touch.
+
+A per-run UUID suffix collapses all three concerns into a single
+pattern: each test invocation owns its own topic from creation
+through teardown, and there is no shared state to clean up between
+runs.
+
+#### Alternatives considered
+
+- **Fixed topic names plus ``AdminClient.delete_topics`` before
+  each test.** Rejected for two reasons. First, it adds admin
+  surface to the integration test for what amounts to broker
+  hygiene; the test's purpose is to exercise producer-through-
+  reconcile, not to manage topic lifecycle. Second,
+  ``delete_topics`` is asynchronous in librdkafka: a subsequent
+  ``ensure_topics`` call can race against the broker's still-pending
+  deletion and either return early (broker still serves the old
+  partition state) or fail with a transient
+  ``UNKNOWN_TOPIC_OR_PART`` error. Avoidable via retry loops, but
+  the complexity cost is not justified at the current scale.
+
+- **Broker-side log truncation per topic.** No reliable librdkafka
+  surface; would require shelling out to
+  ``kafka-delete-records.sh`` or similar. Not portable across the
+  local-docker and CI broker configurations.
+
+- **``docker-compose down`` between every test run.** Rejected as
+  brittle: slow, does not compose with the test runner's session
+  scope, requires shell-out from pytest. Solves the symptom but
+  not at a per-test granularity.
+
+- **Single integration topic with a slice-key prefix.** Use
+  ``trip.completed.v1.integration`` (no suffix) and produce events
+  tagged with a per-run identifier. Rejected because the consumer
+  reads the whole topic from offset 0 (decision 42) and the slice
+  filter happens in application code; per-run filtering in the
+  consumer would require either a fresh slice tuple per run
+  (overengineering) or a new "test slice" abstraction (no production
+  analog).
+
+#### Triggers for promotion
+
+Per-run scratch topics with no admin-side cleanup is appropriate
+under the current operational scope (local docker-compose
+development; ephemeral CI brokers). Promotion to an explicit
+``AdminClient.delete_topics`` teardown is appropriate when one of:
+
+- **Long-lived CI broker.** A CI runner that reuses the same Kafka
+  cluster across test invocations accumulates topic state
+  indefinitely; at a few hundred runs the broker metadata footprint
+  starts to matter. Promotion shape: add a pytest finalizer on the
+  ``topic_suffix`` fixture that calls
+  ``AdminClient.delete_topics(both_topics)`` and ignores
+  ``KafkaException``.
+
+- **Parallel test execution against a shared broker.** If
+  pytest-xdist or similar runs multiple integration tests
+  concurrently against one broker, broker metadata serialization on
+  topic creation starts to bottleneck. Promotion shape: keep per-
+  run scratch topics but pre-allocate from a pool and recycle on
+  success.
 
 ## Architectural Guardrails
 
